@@ -152,20 +152,15 @@ def main():
     subaccounts = get_subaccounts()
     print(f"Found subaccounts: {len(subaccounts)}")
 
-    rows = [[
-        "Run Date",
-        "Subaccount Name",
-        "Subaccount SID",
-        "Subaccount Status",
-        "Messaging Service Name",
-        "Messaging Service SID",
-        "Campaign ID",
-        "Brand Registration SID",
-        "Use Case",
-        "Campaign Status",
-        "Failure Reason",
-        "Note",
-    ]]
+rows = [[
+    "Run Date",
+    "Subaccount Name",
+    "Messaging Service Name",
+    "Brand Registration SID",
+    "Use Case",
+    "Campaign Status",
+    "Failure Reason",
+]]
 
     total_services = 0
     total_campaigns = 0
@@ -180,20 +175,15 @@ def main():
         sub_token = get_subaccount_auth_token(sub_sid)
 
         if not sub_token:
-            rows.append([
-                run_at,
-                sub_name,
-                sub_sid,
-                sub_status,
-                "—",
-                "—",
-                "—",
-                "—",
-                "—",
-                "—",
-                "—",
-                "Could not fetch subaccount auth token",
-            ])
+        rows.append([
+    run_at,
+    sub_name,
+    service_name,
+    brand_registration_sid,
+    use_case,
+    campaign_status,
+    failure_reason,
+])
             continue
 
         services = get_services(sub_sid, sub_token)
