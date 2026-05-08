@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Twilio Monitor — проверяет субаккаунты, бренды и A2P кампании,
+Twilio Monitor — проверяет subaccounts, бренды и A2P campaigns,
 записывает результат в Google Sheets.
 """
 
@@ -22,18 +22,8 @@ MSG_BASE = "https://messaging.twilio.com/v1"
 RELEVANT_USE_CASES = {"MARKETING", "ACCOUNT_NOTIFICATION", "MIXED"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Twilio Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def t_get(url, account_sid=None):
-    auth_sid = account_sid or MASTER_SID
-
-    r = requests.get(
-        url,
-        auth=(auth_sid, MASTER_TOKEN),
-        timeout=30,
-    )
+def t_get(url):
+    r = requests.get(url, auth=(MASTER_SID, MASTER_TOKEN), timeout=30)
 
     if r.ok:
         return r.json()
@@ -56,26 +46,21 @@ def get_subaccounts():
 
 def get_brands(account_sid):
     data = t_get(
-        f"{MSG_BASE}/a2p/BrandRegistrations?PageSize=100",
-        account_sid=account_sid,
+        f"{MSG_BASE}/a2p/BrandRegistrations?PageSize=100&AccountSid={account_sid}"
     )
-
     return data.get("data", []) if data else []
 
 
 def get_services(account_sid):
     data = t_get(
-        f"{MSG_BASE}/Services?PageSize=100",
-        account_sid=account_sid,
+        f"{MSG_BASE}/Services?PageSize=100&AccountSid={account_sid}"
     )
-
     return data.get("services", []) if data else []
 
 
-def get_campaigns(account_sid, service_sid):
+def get_campaigns(service_sid):
     data = t_get(
-        f"{MSG_BASE}/Services/{service_sid}/Compliance/Usa2p?PageSize=100",
-        account_sid=account_sid,
+        f"{MSG_BASE}/Services/{service_sid}/Compliance/Usa2p?PageSize=100"
     )
 
     if not data:
@@ -87,16 +72,11 @@ def get_campaigns(account_sid, service_sid):
 def get_value(obj, *keys, default="—"):
     for key in keys:
         value = obj.get(key)
-
         if value not in [None, ""]:
             return value
 
     return default
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Google Sheets
-# ─────────────────────────────────────────────────────────────────────────────
 
 def get_sheet():
     scopes = [
@@ -112,40 +92,21 @@ def get_sheet():
     )
 
     gc = gspread.authorize(creds)
-
     return gc.open_by_key(SHEET_ID)
 
 
 def ensure_worksheet(spreadsheet, title, rows=1000, cols=20):
     try:
-        ws = spreadsheet.worksheet(title)
-        return ws
-
+        return spreadsheet.worksheet(title)
     except gspread.WorksheetNotFound:
-        return spreadsheet.add_worksheet(
-            title=title,
-            rows=rows,
-            cols=cols,
-        )
+        return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
 
 def replace_worksheet_data(ws, rows):
     ws.clear()
+    ws.resize(rows=max(len(rows), 2), cols=max(len(rows[0]), 1))
+    ws.update(rows, value_input_option="USER_ENTERED")
 
-    ws.resize(
-        rows=max(len(rows), 2),
-        cols=max(len(rows[0]), 1),
-    )
-
-    ws.update(
-        rows,
-        value_input_option="USER_ENTERED",
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     run_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -156,6 +117,16 @@ def main():
     subaccounts = get_subaccounts()
     print(f"   Found {len(subaccounts)} subaccounts")
 
+    subaccount_rows = [[
+        "Run Date",
+        "Subaccount Name",
+        "Subaccount SID",
+        "Subaccount Status",
+        "Date Created",
+        "Date Updated",
+        "Type",
+    ]]
+
     brand_rows = [[
         "Run Date",
         "Subaccount Name",
@@ -165,6 +136,7 @@ def main():
         "Brand SID",
         "Brand Status",
         "Failure Reason",
+        "Raw Note",
     ]]
 
     campaign_rows = [[
@@ -178,22 +150,30 @@ def main():
         "Use Case",
         "Campaign Status",
         "Failure Reason",
+        "Raw Note",
     ]]
 
     total_brands = 0
     total_campaign_rows = 0
 
     for sub in subaccounts:
-        sub_sid = sub["sid"]
+        sub_sid = sub.get("sid", "—")
         sub_name = sub.get("friendly_name", "—")
         sub_status = sub.get("status", "—")
 
         print(f"🔎 Checking {sub_name} / {sub_sid}")
 
-        # ── Brands ──────────────────────────────────────────────────────────
+        subaccount_rows.append([
+            run_at,
+            sub_name,
+            sub_sid,
+            sub_status,
+            sub.get("date_created", "—"),
+            sub.get("date_updated", "—"),
+            sub.get("type", "—"),
+        ])
 
         brands = get_brands(sub_sid)
-
         total_brands += len(brands)
 
         if not brands:
@@ -206,8 +186,8 @@ def main():
                 "—",
                 "—",
                 "—",
+                "No Brand Registration found",
             ])
-
         else:
             for b in brands:
                 brand_rows.append([
@@ -215,23 +195,12 @@ def main():
                     sub_name,
                     sub_sid,
                     sub_status,
-                    get_value(
-                        b,
-                        "company_name",
-                        "companyName",
-                        "brand_name",
-                        "brandName",
-                    ),
+                    get_value(b, "company_name", "companyName", "brand_name", "brandName"),
                     get_value(b, "sid"),
                     get_value(b, "status"),
-                    get_value(
-                        b,
-                        "failure_reason",
-                        "failureReason",
-                    ),
+                    get_value(b, "failure_reason", "failureReason"),
+                    "Brand found",
                 ])
-
-        # ── Messaging Services ──────────────────────────────────────────────
 
         services = get_services(sub_sid)
 
@@ -247,25 +216,33 @@ def main():
                 "—",
                 "—",
                 "—",
+                "No Messaging Services found",
             ])
-
             total_campaign_rows += 1
             continue
 
-        # ── Campaigns ───────────────────────────────────────────────────────
-
         for svc in services:
-            service_sid = svc["sid"]
+            service_sid = svc.get("sid", "—")
+            service_name = svc.get("friendly_name", "—")
 
-            service_name = svc.get(
-                "friendly_name",
-                "—",
-            )
+            campaigns = get_campaigns(service_sid)
 
-            campaigns = get_campaigns(
-                sub_sid,
-                service_sid,
-            )
+            if not campaigns:
+                campaign_rows.append([
+                    run_at,
+                    sub_name,
+                    sub_sid,
+                    sub_status,
+                    service_name,
+                    service_sid,
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "Messaging Service found, but no A2P Campaign found",
+                ])
+                total_campaign_rows += 1
+                continue
 
             relevant_campaigns = []
 
@@ -294,10 +271,9 @@ def main():
                     "—",
                     "—",
                     "—",
+                    "A2P Campaign exists, but not MARKETING / ACCOUNT_NOTIFICATION / MIXED",
                 ])
-
                 total_campaign_rows += 1
-
             else:
                 for c in relevant_campaigns:
                     campaign_rows.append([
@@ -307,86 +283,34 @@ def main():
                         sub_status,
                         service_name,
                         service_sid,
-                        get_value(
-                            c,
-                            "campaign_id",
-                            "campaignId",
-                            "sid",
-                        ),
-                        get_value(
-                            c,
-                            "us_app_to_person_usecase",
-                            "usAppToPersonUsecase",
-                            "use_case",
-                            "useCase",
-                        ),
-                        get_value(
-                            c,
-                            "campaign_status",
-                            "campaignStatus",
-                            "status",
-                        ),
-                        get_value(
-                            c,
-                            "failure_reason",
-                            "failureReason",
-                        ),
+                        get_value(c, "campaign_id", "campaignId", "sid"),
+                        get_value(c, "us_app_to_person_usecase", "usAppToPersonUsecase", "use_case", "useCase"),
+                        get_value(c, "campaign_status", "campaignStatus", "status"),
+                        get_value(c, "failure_reason", "failureReason"),
+                        "Relevant campaign found",
                     ])
-
                     total_campaign_rows += 1
-
-    # ────────────────────────────────────────────────────────────────────────
-    # Google Sheets Write
-    # ────────────────────────────────────────────────────────────────────────
 
     print("📊 Writing to Google Sheets...")
 
     spreadsheet = get_sheet()
 
-    # ── Brands Sheet ────────────────────────────────────────────────────────
+    ws_subaccounts = ensure_worksheet(spreadsheet, "Subaccounts")
+    replace_worksheet_data(ws_subaccounts, subaccount_rows)
+    print(f"   ✅ Subaccounts sheet updated: {len(subaccount_rows) - 1} rows")
 
-    ws_brands = ensure_worksheet(
-        spreadsheet,
-        "Brands",
-    )
+    ws_brands = ensure_worksheet(spreadsheet, "Brands")
+    replace_worksheet_data(ws_brands, brand_rows)
+    print(f"   ✅ Brands sheet updated: {len(brand_rows) - 1} rows")
 
-    replace_worksheet_data(
-        ws_brands,
-        brand_rows,
-    )
-
-    print(
-        f"   ✅ Brands sheet updated: {len(brand_rows) - 1} rows"
-    )
-
-    # ── Campaigns Sheet ─────────────────────────────────────────────────────
-
-    ws_campaigns = ensure_worksheet(
-        spreadsheet,
-        "Campaigns",
-    )
-
-    replace_worksheet_data(
-        ws_campaigns,
-        campaign_rows,
-    )
-
-    print(
-        f"   ✅ Campaigns sheet updated: {len(campaign_rows) - 1} rows"
-    )
-
-    # ── Run Log ─────────────────────────────────────────────────────────────
+    ws_campaigns = ensure_worksheet(spreadsheet, "Campaigns")
+    replace_worksheet_data(ws_campaigns, campaign_rows)
+    print(f"   ✅ Campaigns sheet updated: {len(campaign_rows) - 1} rows")
 
     try:
         ws_log = spreadsheet.worksheet("Run Log")
-
     except gspread.WorksheetNotFound:
-        ws_log = spreadsheet.add_worksheet(
-            title="Run Log",
-            rows=500,
-            cols=5,
-        )
-
+        ws_log = spreadsheet.add_worksheet(title="Run Log", rows=500, cols=5)
         ws_log.append_row([
             "Date",
             "Subaccounts",
@@ -400,14 +324,10 @@ def main():
         len(subaccounts),
         total_brands,
         total_campaign_rows,
-        os.environ.get(
-            "INPUT_NOTE",
-            "Scheduled run",
-        ),
+        os.environ.get("INPUT_NOTE", "Scheduled run"),
     ])
 
     print("   ✅ Run Log updated")
-
     print("🎉 Done!")
 
 
