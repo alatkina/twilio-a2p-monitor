@@ -59,8 +59,8 @@ def get_subaccounts():
 
 def get_services_for_subaccount(subaccount_sid):
     data = t_get(
-        f"{MSG_BASE}/Services?PageSize=1000",
-        subaccount_sid,
+        f"{MSG_BASE}/Accounts/{subaccount_sid}/Services?PageSize=1000",
+        MASTER_SID,
     )
 
     if not data:
@@ -71,8 +71,8 @@ def get_services_for_subaccount(subaccount_sid):
 
 def get_campaigns_for_service(subaccount_sid, service_sid):
     data = t_get(
-        f"{MSG_BASE}/Services/{service_sid}/Compliance/Usa2p?PageSize=100",
-        subaccount_sid,
+        f"{MSG_BASE}/Accounts/{subaccount_sid}/Services/{service_sid}/Compliance/Usa2p?PageSize=100",
+        MASTER_SID,
     )
 
     if not data:
