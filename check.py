@@ -1,7 +1,21 @@
 #!/usr/bin/env python3
 """
-Twilio Monitor — проверяет subaccounts, Messaging Services и A2P 10DLC campaigns.
-Пишет результат в Google Sheets.
+Twilio Monitor
+
+Получает:
+- все subaccounts из master account
+- auth_token каждого subaccount
+- Messaging Services каждого subaccount
+- A2P Campaigns каждого Messaging Service
+
+Пишет:
+- Campaign SID
+- Use Case
+- Campaign Status
+- Messaging Service SID
+- Brand Registration SID
+
+в Google Sheets.
 """
 
 import os
@@ -13,6 +27,7 @@ from google.oauth2.service_account import Credentials
 
 MASTER_SID = os.environ["TWILIO_ACCOUNT_SID"]
 MASTER_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
+
 SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
 GCP_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
 
@@ -26,10 +41,14 @@ RELEVANT_USE_CASES = {
 }
 
 
-def t_get(url, auth_sid):
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_get(url, sid, token):
     r = requests.get(
         url,
-        auth=(auth_sid, MASTER_TOKEN),
+        auth=(sid, token),
         timeout=30,
     )
 
@@ -37,14 +56,30 @@ def t_get(url, auth_sid):
         return r.json()
 
     print(f"⚠️ {r.status_code}: {url}")
-    print(r.text[:500])
+    print(r.text[:300])
+
     return None
 
+
+def get_value(obj, *keys, default="—"):
+    for key in keys:
+        value = obj.get(key)
+
+        if value not in [None, ""]:
+            return value
+
+    return default
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Twilio
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_subaccounts():
     data = t_get(
         f"{TWILIO_BASE}/Accounts.json?PageSize=1000",
         MASTER_SID,
+        MASTER_TOKEN,
     )
 
     if not data:
@@ -57,10 +92,24 @@ def get_subaccounts():
     ]
 
 
-def get_services_for_subaccount(subaccount_sid):
+def get_subaccount_auth_token(subaccount_sid):
     data = t_get(
-        f"{MSG_BASE}/Accounts/{subaccount_sid}/Services?PageSize=1000",
+        f"{TWILIO_BASE}/Accounts/{subaccount_sid}.json",
         MASTER_SID,
+        MASTER_TOKEN,
+    )
+
+    if not data:
+        return None
+
+    return data.get("auth_token")
+
+
+def get_services(sub_sid, sub_token):
+    data = t_get(
+        f"{MSG_BASE}/Services?PageSize=1000",
+        sub_sid,
+        sub_token,
     )
 
     if not data:
@@ -69,27 +118,26 @@ def get_services_for_subaccount(subaccount_sid):
     return data.get("services", [])
 
 
-def get_campaigns_for_service(subaccount_sid, service_sid):
+def get_campaigns(sub_sid, sub_token, service_sid):
     data = t_get(
-        f"{MSG_BASE}/Accounts/{subaccount_sid}/Services/{service_sid}/Compliance/Usa2p?PageSize=100",
-        MASTER_SID,
+        f"{MSG_BASE}/Services/{service_sid}/UsAppToPerson",
+        sub_sid,
+        sub_token,
     )
 
     if not data:
         return []
 
-    return data.get("us_app_to_person", [])
+    # endpoint иногда возвращает объект
+    if isinstance(data, dict):
+        return [data]
+
+    return data
 
 
-def get_value(obj, *keys, default="—"):
-    for key in keys:
-        value = obj.get(key)
-
-        if value not in [None, ""]:
-            return value
-
-    return default
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Google Sheets
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_sheet():
     scopes = [
@@ -103,12 +151,14 @@ def get_sheet():
     )
 
     gc = gspread.authorize(creds)
+
     return gc.open_by_key(SHEET_ID)
 
 
 def ensure_worksheet(spreadsheet, title):
     try:
         return spreadsheet.worksheet(title)
+
     except gspread.WorksheetNotFound:
         return spreadsheet.add_worksheet(
             title=title,
@@ -119,23 +169,31 @@ def ensure_worksheet(spreadsheet, title):
 
 def replace_sheet(ws, rows):
     ws.clear()
+
     ws.resize(
         rows=max(len(rows), 2),
         cols=max(len(rows[0]), 1),
     )
+
     ws.update(
         rows,
         value_input_option="USER_ENTERED",
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
 def main():
     run_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     print(f"🚀 Twilio Monitor — {run_at}")
 
-    print("📋 Fetching subaccounts from master account...")
+    print("📋 Fetching subaccounts...")
+
     subaccounts = get_subaccounts()
+
     print(f"Found subaccounts: {len(subaccounts)}")
 
     rows = [[
@@ -147,7 +205,7 @@ def main():
         "Messaging Service SID",
         "Campaign SID",
         "Brand Registration SID",
-        "Use Case",
+        "Campaign Use Case",
         "Campaign Status",
         "Failure Reason",
         "Note",
@@ -161,10 +219,42 @@ def main():
         sub_name = sub.get("friendly_name", "—")
         sub_status = sub.get("status", "—")
 
-        print(f"🔎 Checking subaccount: {sub_name} / {sub_sid}")
+        print(f"🔎 {sub_name} / {sub_sid}")
 
-        services = get_services_for_subaccount(sub_sid)
-        print(f"   Messaging services found: {len(services)}")
+        # ─────────────────────────────────────────────────────────────────────
+        # Get subaccount auth token
+        # ─────────────────────────────────────────────────────────────────────
+
+        sub_token = get_subaccount_auth_token(sub_sid)
+
+        if not sub_token:
+            rows.append([
+                run_at,
+                sub_name,
+                sub_sid,
+                sub_status,
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "Could not fetch subaccount auth token",
+            ])
+
+            continue
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Get Messaging Services
+        # ─────────────────────────────────────────────────────────────────────
+
+        services = get_services(
+            sub_sid,
+            sub_token,
+        )
+
+        print(f"   Messaging Services: {len(services)}")
 
         if not services:
             rows.append([
@@ -179,22 +269,30 @@ def main():
                 "—",
                 "—",
                 "—",
-                "No Messaging Service found",
+                "No Messaging Services found",
             ])
+
             continue
 
         total_services += len(services)
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Campaigns
+        # ─────────────────────────────────────────────────────────────────────
 
         for svc in services:
             service_sid = svc.get("sid", "—")
             service_name = svc.get("friendly_name", "—")
 
-            campaigns = get_campaigns_for_service(
+            print(f"   Service: {service_name} / {service_sid}")
+
+            campaigns = get_campaigns(
                 sub_sid,
+                sub_token,
                 service_sid,
             )
 
-            print(f"   {service_name} / {service_sid}: campaigns found {len(campaigns)}")
+            print(f"      Campaigns: {len(campaigns)}")
 
             if not campaigns:
                 rows.append([
@@ -211,56 +309,26 @@ def main():
                     "—",
                     "No A2P Campaign found",
                 ])
+
                 continue
+
+            total_campaigns += len(campaigns)
 
             for campaign in campaigns:
                 use_case = get_value(
                     campaign,
                     "us_app_to_person_usecase",
-                    "usAppToPersonUsecase",
                     "use_case",
                     "useCase",
+                    "usAppToPersonUsecase",
                 )
 
-                use_case_upper = str(use_case).upper()
-
-                if use_case_upper not in RELEVANT_USE_CASES:
-                    rows.append([
-                        run_at,
-                        sub_name,
-                        sub_sid,
-                        sub_status,
-                        service_name,
-                        service_sid,
-                        get_value(
-                            campaign,
-                            "sid",
-                            "campaign_sid",
-                            "campaignSid",
-                            "campaign_id",
-                            "campaignId",
-                        ),
-                        get_value(
-                            campaign,
-                            "brand_registration_sid",
-                            "brandRegistrationSid",
-                        ),
-                        use_case,
-                        get_value(
-                            campaign,
-                            "campaign_status",
-                            "campaignStatus",
-                            "status",
-                        ),
-                        get_value(
-                            campaign,
-                            "failure_reason",
-                            "failureReason",
-                        ),
-                        "Campaign found, but use case is not Marketing / Account Notification",
-                    ])
-                    total_campaigns += 1
-                    continue
+                campaign_status = get_value(
+                    campaign,
+                    "campaign_status",
+                    "status",
+                    "campaignStatus",
+                )
 
                 rows.append([
                     run_at,
@@ -271,11 +339,9 @@ def main():
                     service_sid,
                     get_value(
                         campaign,
-                        "sid",
-                        "campaign_sid",
-                        "campaignSid",
                         "campaign_id",
                         "campaignId",
+                        "sid",
                     ),
                     get_value(
                         campaign,
@@ -283,21 +349,18 @@ def main():
                         "brandRegistrationSid",
                     ),
                     use_case,
-                    get_value(
-                        campaign,
-                        "campaign_status",
-                        "campaignStatus",
-                        "status",
-                    ),
+                    campaign_status,
                     get_value(
                         campaign,
                         "failure_reason",
                         "failureReason",
                     ),
-                    "Relevant campaign found",
+                    "Campaign found",
                 ])
 
-                total_campaigns += 1
+    # ─────────────────────────────────────────────────────────────────────────
+    # Google Sheets
+    # ─────────────────────────────────────────────────────────────────────────
 
     print("📊 Writing to Google Sheets...")
 
@@ -310,21 +373,26 @@ def main():
 
     replace_sheet(ws, rows)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Run Log
+    # ─────────────────────────────────────────────────────────────────────────
+
     try:
         ws_log = spreadsheet.worksheet("Run Log")
+
     except gspread.WorksheetNotFound:
         ws_log = spreadsheet.add_worksheet(
             title="Run Log",
             rows=500,
             cols=5,
         )
+
         ws_log.append_row([
             "Date",
             "Subaccounts",
             "Services",
             "Campaigns",
             "Rows",
-            "Note",
         ])
 
     ws_log.append_row([
@@ -333,10 +401,9 @@ def main():
         total_services,
         total_campaigns,
         len(rows) - 1,
-        os.environ.get("INPUT_NOTE", "Scheduled run"),
     ])
 
-    print(f"✅ Updated rows: {len(rows) - 1}")
+    print(f"✅ Rows written: {len(rows) - 1}")
     print("🎉 Done!")
 
 
