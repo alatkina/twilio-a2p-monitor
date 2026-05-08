@@ -24,8 +24,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install requests gspread google-auth
+        run: pip install requests gspread google-auth
 
       - name: Run Twilio monitor
         env:
