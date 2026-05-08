@@ -2,19 +2,20 @@ name: Twilio Monitor
 
 on:
   schedule:
-    - cron: '0 9 1 * *'  # 1-го числа каждого месяца в 9:00 UTC
-  workflow_dispatch:      # Ручной запуск через GitHub UI
+    - cron: '0 9 1 * *'
+  workflow_dispatch:
     inputs:
       note:
-        description: 'Комментарий к запуску (необязательно)'
+        description: 'Комментарий к запуску'
         required: false
         default: 'Manual run'
 
 jobs:
   check:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -23,12 +24,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests gspread google-auth openpyxl
+        run: |
+          pip install requests gspread google-auth
 
-      - name: Run Twilio check
+      - name: Run Twilio monitor
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          INPUT_NOTE: ${{ github.event.inputs.note }}
         run: python check.py
