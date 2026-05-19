@@ -3,19 +3,20 @@ name: Twilio Monitor
 on:
   schedule:
     - cron: '0 9 1 * *'
+
   workflow_dispatch:
     inputs:
-      note:
-        description: 'Комментарий к запуску'
+      account:
+        description: 'Subaccount name (optional)'
         required: false
-        default: 'Manual run'
+        default: ''
 
 jobs:
   check:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -24,13 +25,19 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests gspread google-auth
+        run: pip install requests gspread google-auth openpyxl
 
-      - name: Run Twilio monitor
+      - name: Run Twilio check
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          INPUT_NOTE: ${{ github.event.inputs.note }}
+          INPUT_ACCOUNT: ${{ github.event.inputs.account }}
         run: python check.py
+
+      - name: Upload result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: twilio-result
+          path: result.md
