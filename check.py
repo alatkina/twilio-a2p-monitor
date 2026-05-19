@@ -13,13 +13,14 @@ MASTER_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
 SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
 GCP_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
 
+ACCOUNT_FILTER = os.environ.get(
+    "INPUT_ACCOUNT",
+    "",
+).lower().strip()
+
 TWILIO_BASE = "https://api.twilio.com/2010-04-01"
 MSG_BASE = "https://messaging.twilio.com/v1"
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def clean_cell(value):
     if value in [None, ""]:
@@ -57,10 +58,6 @@ def get_value(obj, *keys, default="—"):
     return default
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Twilio
-# ─────────────────────────────────────────────────────────────────────────────
-
 def get_subaccounts():
     data = t_get(
         f"{TWILIO_BASE}/Accounts.json?PageSize=1000",
@@ -71,11 +68,22 @@ def get_subaccounts():
     if not data:
         return []
 
-    return [
+    accounts = [
         account
         for account in data.get("accounts", [])
         if account.get("sid") != MASTER_SID
     ]
+
+    if ACCOUNT_FILTER:
+        accounts = [
+            a for a in accounts
+            if ACCOUNT_FILTER in a.get(
+                "friendly_name",
+                "",
+            ).lower()
+        ]
+
+    return accounts
 
 
 def get_subaccount_auth_token(subaccount_sid):
@@ -116,10 +124,6 @@ def get_campaigns(sub_sid, sub_token, service_sid):
 
     return data.get("compliance", [])
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Google Sheets
-# ─────────────────────────────────────────────────────────────────────────────
 
 def get_sheet():
     scopes = [
@@ -168,19 +172,8 @@ def replace_sheet(ws, rows):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
-
 def main():
     run_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    print(f"🚀 Twilio Monitor — {run_at}")
-
-    print("📋 Fetching subaccounts...")
-    subaccounts = get_subaccounts()
-
-    print(f"Found subaccounts: {len(subaccounts)}")
 
     rows = [[
         "Run Date",
@@ -192,67 +185,49 @@ def main():
         "Failure Reason",
     ]]
 
-    total_services = 0
-    total_campaigns = 0
+    markdown = [
+        f"# Twilio A2P Result ({run_at})",
+        "",
+    ]
+
+    subaccounts = get_subaccounts()
 
     for sub in subaccounts:
         sub_sid = sub.get("sid", "—")
         sub_name = sub.get("friendly_name", "—")
 
-        print(f"🔎 {sub_name} / {sub_sid}")
+        markdown.append(f"## {sub_name}")
+        markdown.append("")
 
         sub_token = get_subaccount_auth_token(sub_sid)
 
         if not sub_token:
-            rows.append([
-                run_at,
-                sub_name,
-                "—",
-                "—",
-                "—",
-                "—",
-                "Could not fetch subaccount auth token",
-            ])
+            markdown.append(
+                "- Could not fetch subaccount auth token"
+            )
+            markdown.append("")
             continue
 
         services = get_services(sub_sid, sub_token)
 
-        print(f"   Messaging Services: {len(services)}")
-
         if not services:
-            rows.append([
-                run_at,
-                sub_name,
-                "—",
-                "—",
-                "—",
-                "—",
-                "No Messaging Services found",
-            ])
+            markdown.append(
+                "- No Messaging Services found"
+            )
+            markdown.append("")
             continue
 
-        total_services += len(services)
-
-        # separator row between subaccounts
         rows.append(["", "", "", "", "", "", ""])
 
         for svc in services:
             service_sid = svc.get("sid", "—")
-
-            service_name = svc.get(
-                "friendly_name",
-                "—",
-            )
-
-            print(f"   Service: {service_name}")
+            service_name = svc.get("friendly_name", "—")
 
             campaigns = get_campaigns(
                 sub_sid,
                 sub_token,
                 service_sid,
             )
-
-            print(f"      Campaigns: {len(campaigns)}")
 
             if not campaigns:
                 rows.append([
@@ -265,54 +240,56 @@ def main():
                     "No A2P Campaign found",
                 ])
 
+                markdown.append(
+                    f"- {service_name}: No A2P Campaign found"
+                )
+
                 continue
 
-            total_campaigns += len(campaigns)
-
             for campaign in campaigns:
+                use_case = get_value(
+                    campaign,
+                    "use_case",
+                    "useCase",
+                    "us_app_to_person_usecase",
+                    "usAppToPersonUsecase",
+                )
+
+                status = get_value(
+                    campaign,
+                    "campaign_status",
+                    "campaignStatus",
+                    "status",
+                )
+
+                failure = get_value(
+                    campaign,
+                    "failure_reason",
+                    "failureReason",
+                    "errors",
+                )
+
+                brand_sid = get_value(
+                    campaign,
+                    "brand_registration_sid",
+                    "brandRegistrationSid",
+                )
+
                 rows.append([
                     run_at,
-
-                    # Subaccount
                     sub_name,
-
-                    # Messaging Service
                     service_name,
-
-                    # Brand SID
-                    get_value(
-                        campaign,
-                        "brand_registration_sid",
-                        "brandRegistrationSid",
-                    ),
-
-                    # Use Case
-                    get_value(
-                        campaign,
-                        "use_case",
-                        "useCase",
-                        "us_app_to_person_usecase",
-                        "usAppToPersonUsecase",
-                    ),
-
-                    # Campaign Status
-                    get_value(
-                        campaign,
-                        "campaign_status",
-                        "campaignStatus",
-                        "status",
-                    ),
-
-                    # Failure Reason
-                    get_value(
-                        campaign,
-                        "failure_reason",
-                        "failureReason",
-                        "errors",
-                    ),
+                    brand_sid,
+                    use_case,
+                    status,
+                    failure,
                 ])
 
-    print("📊 Writing to Google Sheets...")
+                markdown.append(
+                    f"- {service_name} | {use_case} | {status}"
+                )
+
+        markdown.append("")
 
     spreadsheet = get_sheet()
 
@@ -323,37 +300,9 @@ def main():
 
     replace_sheet(ws, rows)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Run Log
-    # ─────────────────────────────────────────────────────────────────────────
+    with open("result.md", "w") as f:
+        f.write("\n".join(markdown))
 
-    try:
-        ws_log = spreadsheet.worksheet("Run Log")
-
-    except gspread.WorksheetNotFound:
-        ws_log = spreadsheet.add_worksheet(
-            title="Run Log",
-            rows=500,
-            cols=5,
-        )
-
-        ws_log.append_row([
-            "Date",
-            "Subaccounts",
-            "Services",
-            "Campaigns",
-            "Rows",
-        ])
-
-    ws_log.append_row([
-        clean_cell(run_at),
-        clean_cell(len(subaccounts)),
-        clean_cell(total_services),
-        clean_cell(total_campaigns),
-        clean_cell(len(rows) - 1),
-    ])
-
-    print(f"✅ Rows written: {len(rows) - 1}")
     print("🎉 Done!")
 
 
