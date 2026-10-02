@@ -83,7 +83,6 @@ MAIN_HEADER = [
     "Friendly Name",
     "Messaging Service Name",
     "Match Status",
-    "Matched Subaccount",
     "Next Step",
     "Capabilities",
     "Date Added",
@@ -92,12 +91,11 @@ MAIN_HEADER = [
 ]
  
 M_COL_STATUS = MAIN_HEADER.index("Match Status")
-M_COL_MATCH = MAIN_HEADER.index("Matched Subaccount")
 M_COL_NEXT = MAIN_HEADER.index("Next Step")
 M_COL_SERVICE = MAIN_HEADER.index("Messaging Service Name")
 M_COL_SID = MAIN_HEADER.index("Phone Number SID")
  
-MAIN_COLUMN_WIDTHS = [250, 230, 260, 160, 230, 280, 140, 105, 290, 150]
+MAIN_COLUMN_WIDTHS = [250, 260, 260, 260, 290, 140, 105, 290, 150]
  
 NO_SUBACCOUNT = "NO SUBACCOUNT"
 HAS_SUBACCOUNT = "SUBACCOUNT EXISTS"
@@ -109,6 +107,75 @@ MATCH_GROUPS = {
     HAS_SUBACCOUNT: "Partner already has a subaccount",
     UNNAMED: "Can't tell whose number it is",
     INTERNAL: "AgVend internal / test",
+}
+ 
+# Known Friendly Name prefixes on the main account -> subaccount they belong to.
+# Matching ignores case, spaces and punctuation ("the_rack" == "The Rack"),
+# and the longest prefix wins ("legacy_coop_nebraska" beats "legacycoop").
+PARTNER_ALIASES = {
+    "Farmers Coop Society": ["FCS", "Farmers Coop Society"],
+    "Gold-Eagle Cooperative": ["GoldEagle"],
+    "Growmark, Inc.": ["Growmark"],
+    "Tri-Ag Products, Inc.": ["Tri Ag"],
+    "McEwen’s Fuels & Fertilizers Inc.": ["McEwens"],
+    "AgroPlus Inc.": ["AgroPlus"],
+    "AgState": ["AgState"],
+    "Horizon Fertilizers": ["Horizon Fertilizers", "horizon_fertilizers"],
+    "South Central FS, Inc.": ["South Central FS"],
+    "Braungardt Agricultural Services": ["braungardt"],
+    "ADM": ["adm", "adm_canada", "adm_wholesale"],
+    "Ag Partners MN": ["ag_partnersmn"],
+    "Ag Valley Co-op": ["ag_valley_coop"],
+    "Agri Partners": ["agri_partners"],
+    "AgXplore": ["agxplore"],
+    "Alcivia": ["Alcivia"],
+    "American Plains Coop": ["americanplainscoop"],
+    "CenDak Cooperative": ["cendak"],
+    "Centerra Co-op": ["centerra"],
+    "Centra Sota Cooperative": ["Centra Sota"],
+    "Central Farm Service": ["cfs"],
+    "Central Missouri AgriService LLC": ["cmas"],
+    "Clifford Farmers Elevator": ["clifford_farmers_elevator"],
+    "Cooperative Farmers Elevator": ["cfe"],
+    "Cooperative Producers Inc.": ["CPI"],
+    "Country Partners Cooperative": ["countrypartners"],
+    "Country Visions": ["country_visions"],
+    "CVA": ["CVA"],
+    "Emerge Ag Solutions Inc.": ["emergeagsolution"],
+    "Five Star Cooperative": ["Five Star", "five_star"],
+    "Frontier": ["frontier_coop"],
+    "GreenPoint Ag": ["greenpoint"],
+    "Hawks Agro": ["hawksagro"],
+    "Heartland Feed Services": ["heartland_feed"],
+    "HerbersAg": ["herbersag"],
+    "Integrated Agronomy Advisors LLC": ["integratedagronomyadvisors"],
+    "Kanza Cooperative": ["kanza_coop"],
+    "Kokomo Grain Co., Inc.": ["Kokomo"],
+    "Legacy Cooperative": ["legacycoop"],
+    "Legacy Cooperative Nebraska": ["legacy_coop_nebraska"],
+    "Mercer Landmark": ["mercer_landmark"],
+    "Mid Kansas Cooperative": ["mkc"],
+    "Midway Coop": ["midwaycoop"],
+    "Nexus Cooperative": ["Nexus"],
+    "NuWay-K&H Cooperative": ["Nuway"],
+    "Premier Ag": ["premier_comp"],  # probable match
+    "Pro Cooperative": ["pro_coop"],
+    "Pro Valley LLC": ["provalley"],
+    "Producers Cooperative Association": ["pcacoop"],
+    "Rack Petroleum Ltd.": ["the_rack"],
+    "Redstar, LLC": ["redstar"],
+    "Reichmansales": ["reichmansales"],
+    "River Valley": ["river_valley"],
+    "Shur Gro": ["shurgro"],
+    "Soil Mender": ["Soil Mender"],
+    "South West Terminal Ltd": ["southwestterminal"],
+    "Superior Ag": ["superiorag"],
+    "SYNENERGY PARTNERS, LLC": ["SynEnergy"],
+    "Tyree Ag LLC": ["Tyree Ag"],
+    "United Cooperative": ["united_coop"],
+    "United Farmers Cooperative": ["ufc_mn"],
+    "Ursa Coop": ["ursa_coop"],
+    "Valley Wide Cooperative": ["valleywide"],
 }
  
 # Numbers whose name contains one of these are treated as AgVend's own
@@ -341,23 +408,69 @@ def match_subaccounts(texts, subaccounts):
     return matches
  
  
-def classify_main_number(friendly, service_names, subaccounts):
-    texts = [friendly] + list(service_names)
-    blob = " ".join(texts).lower()
+def squash(text):
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
  
+ 
+def alias_partner(texts):
+    """Partner from PARTNER_ALIASES whose prefix starts one of the names (longest wins)."""
+    best, best_len = None, 0
+ 
+    for partner, aliases in PARTNER_ALIASES.items():
+        for alias in aliases:
+            key = squash(alias)
+            if len(key) > best_len and any(squash(t).startswith(key) for t in texts):
+                best, best_len = partner, len(key)
+ 
+    return best
+ 
+ 
+def find_subaccount(partner, subaccounts):
+    """The real subaccount name for a partner, or None if there is no such subaccount."""
+    key = squash(partner)
+ 
+    for sub in subaccounts:
+        name = sub.get("friendly_name", "")
+        if squash(name) == key:
+            return name
+ 
+    for sub in subaccounts:  # small spelling differences
+        name = sub.get("friendly_name", "")
+        if difflib.SequenceMatcher(None, squash(name), key).ratio() >= 0.9:
+            return name
+ 
+    return None
+ 
+ 
+def classify_main_number(friendly, service_names, subaccounts):
+    """
+    Returns (category, match_label, next_step).
+    match_label is the subaccount name when we know whose number it is.
+    """
+    texts = [t for t in [friendly] + list(service_names) if t]
+ 
+    partner = alias_partner(texts)
+    if partner:
+        sub_name = find_subaccount(partner, subaccounts)
+        if sub_name:
+            return (HAS_SUBACCOUNT, sub_name,
+                    "Check: should it move to that subaccount?")
+        return (NO_SUBACCOUNT, f"{partner} (no subaccount)",
+                "Create a subaccount for this partner?")
+ 
+    blob = " ".join(texts).lower()
     if any(re.search(rf"\b{k}\b", blob) for k in INTERNAL_KEYWORDS):
-        return INTERNAL, "", ""
+        return INTERNAL, INTERNAL, ""
  
     if not any(has_letters(t) and name_tokens(t) for t in texts):
-        return UNNAMED, "", "Give the number a partner name to identify it"
+        return UNNAMED, UNNAMED, "Give the number a partner name to identify it"
  
     matches = match_subaccounts(texts, subaccounts)
- 
     if matches:
         return (HAS_SUBACCOUNT, ", ".join(matches),
                 "Check: should it move to that subaccount?")
  
-    return NO_SUBACCOUNT, "", "Check: does this partner need a subaccount?"
+    return NO_SUBACCOUNT, NO_SUBACCOUNT, "Check: does this partner need a subaccount?"
  
  
 # --------------------------------------------------------------------------
@@ -551,7 +664,7 @@ def existing_conditional_rule_count(spreadsheet, sheet_id):
 def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
                  status_col, tab_color, center_cols=(), wrap_cols=(),
                  mono_cols=(), muted_from_col=None, bold_cols=(), extra_rules=(),
-                 dim_first_col=True):
+                 dim_first_col=True, cell_fills=()):
     """
     Re-applies all formatting from scratch on every run, so the sheet looks
     the same no matter what the previous run left behind.
@@ -666,6 +779,19 @@ def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
             "foregroundColor": rgb("#7B8794")}},
             "userEnteredFormat.textFormat.fontFamily,userEnteredFormat.textFormat.fontSize,"
             "userEnteredFormat.textFormat.foregroundColor")
+ 
+    # Static colors for cells whose text varies (e.g. a subaccount name as status)
+    for r0, r1, c, bg, fg in cell_fills:
+        requests_.append({
+            "repeatCell": {
+                "range": grid(sid, r0, r1, c, c + 1),
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": rgb(bg),
+                    "textFormat": {"foregroundColor": rgb(fg), "bold": True}}},
+                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor,"
+                          "userEnteredFormat.textFormat.bold",
+            }
+        })
  
     # Fit row heights to the new content (old heights would otherwise stick
     # to whatever row now sits there), then make the subaccount bands taller
@@ -1009,17 +1135,19 @@ def main():
  
     markdown += ["## Main account numbers", ""]
  
+    main_category = {}  # number SID -> category, for sorting
+ 
     for num in get_incoming_numbers(MASTER_SID, MASTER_TOKEN):
         friendly = num.get("friendly_name") or ""
         services = main_links.get(num.get("sid"), [])
         status, matched, next_step = classify_main_number(friendly, services, all_subaccounts)
+        main_category[num.get("sid", "—")] = status
  
         main_buckets[status].append([
             as_text(num.get("phone_number", "")),
             friendly or "—",
             ", ".join(services) or "—",
-            status,
-            matched or "—",
+            matched,
             next_step,
             format_capabilities(num.get("capabilities")),
             format_date(num.get("date_created")),
@@ -1033,10 +1161,22 @@ def main():
  
     main_rows, main_groups = build_rows(
         MAIN_HEADER, main_groups,
-        rank=lambda r: status_rank(r[M_COL_STATUS]),
+        # by category, then partner name so one partner's numbers sit together
+        rank=lambda r: (status_rank(main_category.get(r[M_COL_SID])),
+                        r[M_COL_STATUS].lower()),
         summary=lambda rs: plural(len(rs), "phone number"),
         band_prefix="Main account",
     )
+ 
+    category_by_label = {label: cat for cat, label in MATCH_GROUPS.items()}
+    category_colors = {cat: (bg, fg) for cat, bg, fg in STATUS_STYLES
+                       if cat in MATCH_GROUPS}
+    main_fills = []
+    for band, start, end in main_groups:
+        cat = category_by_label.get(main_rows[band][0])
+        if cat and end > start:
+            bg, fg = category_colors[cat]
+            main_fills.append((start, end, M_COL_STATUS, bg, fg))
  
     rows, groups = build_rows(
         HEADER, campaign_groups,
@@ -1114,7 +1254,7 @@ def main():
     replace_sheet(ws_main, main_rows if len(main_rows) > 1
                   else main_rows + [["No phone numbers on the main account"]
                                     + [""] * (len(MAIN_HEADER) - 1)])
-    main_statuses = {r[M_COL_STATUS] for r in main_rows[1:]}
+    main_statuses = set(main_category.values())
     format_sheet(
         spreadsheet, ws_main, max(len(main_rows), 2), main_groups,
         header=MAIN_HEADER,
@@ -1123,7 +1263,8 @@ def main():
         tab_color=("#D64545" if NO_SUBACCOUNT in main_statuses
                    else "#E8A33D" if HAS_SUBACCOUNT in main_statuses
                    else "#2E9E5B"),
-        wrap_cols=[M_COL_SERVICE, M_COL_MATCH],
+        wrap_cols=[M_COL_SERVICE, M_COL_STATUS],
+        cell_fills=main_fills,
         bold_cols=[M_COL_NEXT],
         muted_from_col=M_COL_SID,
         dim_first_col=False,
