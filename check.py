@@ -1,7 +1,10 @@
+Twilio a2p monitor · PY
 #!/usr/bin/env python3
  
 import os
+import re
 import json
+import difflib
 import requests
 import gspread
 from datetime import datetime, timezone
@@ -52,6 +55,7 @@ NUMBERS_HEADER = [
     "Friendly Name",
     "Messaging Service Name",
     "Campaign Status",
+    "Next Step",
     "Capabilities",
     "Date Added",
     "Phone Number SID",
@@ -61,9 +65,10 @@ NUMBERS_HEADER = [
 N_COL_NUMBER = NUMBERS_HEADER.index("Phone Number")
 N_COL_SERVICE = NUMBERS_HEADER.index("Messaging Service Name")
 N_COL_STATUS = NUMBERS_HEADER.index("Campaign Status")
+N_COL_NEXT = NUMBERS_HEADER.index("Next Step")
 N_COL_SID = NUMBERS_HEADER.index("Phone Number SID")
  
-NUMBERS_COLUMN_WIDTHS = [230, 150, 200, 270, 135, 140, 105, 290, 150]
+NUMBERS_COLUMN_WIDTHS = [230, 150, 200, 270, 135, 230, 140, 105, 290, 150]
  
 # Status shown when a subaccount/service has nothing to report
 NO_CAMPAIGN = "NO CAMPAIGN"
@@ -71,6 +76,65 @@ NO_SERVICES = "NO SERVICES"
 NO_TOKEN = "NO ACCESS"
 NOT_IN_SERVICE = "NOT IN SERVICE"
 NO_NUMBERS = "NO NUMBERS"
+ 
+MAIN_SHEET_TITLE = "Main Account Numbers"
+ 
+MAIN_HEADER = [
+    "Phone Number",
+    "Friendly Name",
+    "Messaging Service Name",
+    "Match Status",
+    "Matched Subaccount",
+    "Next Step",
+    "Capabilities",
+    "Date Added",
+    "Phone Number SID",
+    "Run Date",
+]
+ 
+M_COL_STATUS = MAIN_HEADER.index("Match Status")
+M_COL_MATCH = MAIN_HEADER.index("Matched Subaccount")
+M_COL_NEXT = MAIN_HEADER.index("Next Step")
+M_COL_SERVICE = MAIN_HEADER.index("Messaging Service Name")
+M_COL_SID = MAIN_HEADER.index("Phone Number SID")
+ 
+MAIN_COLUMN_WIDTHS = [250, 230, 260, 160, 230, 280, 140, 105, 290, 150]
+ 
+NO_SUBACCOUNT = "NO SUBACCOUNT"
+HAS_SUBACCOUNT = "SUBACCOUNT EXISTS"
+UNNAMED = "UNNAMED"
+INTERNAL = "INTERNAL"
+ 
+MATCH_GROUPS = {
+    NO_SUBACCOUNT: "No matching subaccount",
+    HAS_SUBACCOUNT: "Partner already has a subaccount",
+    UNNAMED: "Can't tell whose number it is",
+    INTERNAL: "AgVend internal / test",
+}
+ 
+# Numbers whose name contains one of these are treated as AgVend's own
+INTERNAL_KEYWORDS = ["agvend", "test", "qa", "demo", "sandbox", "internal"]
+ 
+# Words that say nothing about the partner and are ignored when matching names
+NAME_STOP_WORDS = {
+    "inc", "llc", "ltd", "lp", "co", "corp", "corporation", "company", "the",
+    "of", "and", "cooperative", "coop", "cooperatives", "partners", "group",
+    "messaging", "service", "services", "a2p", "sms", "mms", "default",
+    "marketing", "account", "notification", "notifications", "conversations",
+    "for", "number", "numbers", "phone", "main", "primary", "new", "old",
+}
+ 
+# "Next Step" hints on the Phone Numbers tab
+READY_TO_MOVE = "Ready: move numbers here"
+NEXT_STEPS = {
+    "FAILED": "Fix campaign and resubmit",
+    "IN_PROGRESS": "Wait for campaign review",
+    "PENDING": "Wait for campaign review",
+    NOT_IN_SERVICE: "Attach to a Messaging Service",
+    NO_CAMPAIGN: "Register an A2P campaign",
+    NO_TOKEN: "Check subaccount access",
+}
+READY_STYLE = ("#DCEBFF", "#1A56C4")  # bright blue: "everything is ready"
  
 # Lower rank = more urgent = higher in the sheet
 STATUS_RANK = {
@@ -83,6 +147,10 @@ STATUS_RANK = {
     NO_CAMPAIGN: 3,
     NO_NUMBERS: 3,
     "VERIFIED": 4,
+    NO_SUBACCOUNT: 0,
+    HAS_SUBACCOUNT: 1,
+    UNNAMED: 2,
+    INTERNAL: 3,
 }
  
 STATUS_STYLES = [
@@ -96,6 +164,10 @@ STATUS_STYLES = [
     (NO_CAMPAIGN, "#ECEFF3", "#616E7C"),
     (NO_SERVICES, "#ECEFF3", "#616E7C"),
     (NO_NUMBERS, "#ECEFF3", "#616E7C"),
+    (NO_SUBACCOUNT, "#FBDADA", "#B3261E"),
+    (HAS_SUBACCOUNT, "#FFE3CC", "#9C4A00"),
+    (UNNAMED, "#ECEFF3", "#616E7C"),
+    (INTERNAL, "#ECEFF3", "#616E7C"),
 ]
  
  
@@ -222,6 +294,73 @@ def format_date(value):
         return str(value)[:10]
  
  
+def name_tokens(text):
+    text = (text or "").lower().replace("&", " and ")
+    tokens = re.findall(r"[a-z0-9]+", text)
+    return [t for t in tokens if t not in NAME_STOP_WORDS and not t.isdigit()]
+ 
+ 
+def has_letters(text):
+    return bool(re.search(r"[A-Za-z]", text or ""))
+ 
+ 
+def match_subaccounts(texts, subaccounts):
+    """
+    Which subaccounts does a number belong to, judging by its friendly name and
+    the names of the Messaging Services it sits in? Returns matching names.
+    """
+    tokens = set()
+    for t in texts:
+        tokens.update(name_tokens(t))
+ 
+    if not tokens:
+        return []
+ 
+    # "Herbers Ag" -> "herbersag", so spacing and small typos don't matter
+    squashed_texts = ["".join(name_tokens(t)) for t in texts if name_tokens(t)]
+    matches = []
+ 
+    for sub in subaccounts:
+        name = sub.get("friendly_name", "")
+        sub_tokens = set(name_tokens(name))
+        if not sub_tokens:
+            continue
+ 
+        # Every meaningful word of the subaccount name appears in the number's name
+        if sub_tokens <= tokens:
+            matches.append(name)
+        # Short name like "Kokomo" for "Kokomo Grain Co., Inc."
+        elif tokens <= sub_tokens and any(len(t) >= 5 for t in tokens):
+            matches.append(name)
+        # Typos / spacing differences ("Herbers Ag" vs "HerbersAg")
+        elif any(
+            difflib.SequenceMatcher(None, squashed, "".join(name_tokens(name))).ratio() >= 0.85
+            for squashed in squashed_texts
+        ):
+            matches.append(name)
+ 
+    return matches
+ 
+ 
+def classify_main_number(friendly, service_names, subaccounts):
+    texts = [friendly] + list(service_names)
+    blob = " ".join(texts).lower()
+ 
+    if any(re.search(rf"\b{k}\b", blob) for k in INTERNAL_KEYWORDS):
+        return INTERNAL, "", ""
+ 
+    if not any(has_letters(t) and name_tokens(t) for t in texts):
+        return UNNAMED, "", "Give the number a partner name to identify it"
+ 
+    matches = match_subaccounts(texts, subaccounts)
+ 
+    if matches:
+        return (HAS_SUBACCOUNT, ", ".join(matches),
+                "Check: should it move to that subaccount?")
+ 
+    return NO_SUBACCOUNT, "", "Check: does this partner need a subaccount?"
+ 
+ 
 # --------------------------------------------------------------------------
 # Twilio
 # --------------------------------------------------------------------------
@@ -246,7 +385,7 @@ def t_get_all(url, sid, token, key):
     return items
  
  
-def get_subaccounts():
+def get_subaccounts(apply_filter=True):
     data = t_get(
         f"{TWILIO_BASE}/Accounts.json?PageSize=1000",
         MASTER_SID,
@@ -262,7 +401,7 @@ def get_subaccounts():
         if account.get("sid") != MASTER_SID
     ]
  
-    if ACCOUNT_FILTER:
+    if ACCOUNT_FILTER and apply_filter:
         accounts = [
             a for a in accounts
             if ACCOUNT_FILTER in a.get(
@@ -412,7 +551,8 @@ def existing_conditional_rule_count(spreadsheet, sheet_id):
  
 def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
                  status_col, tab_color, center_cols=(), wrap_cols=(),
-                 mono_cols=(), muted_from_col=None):
+                 mono_cols=(), muted_from_col=None, bold_cols=(), extra_rules=(),
+                 dim_first_col=True):
     """
     Re-applies all formatting from scratch on every run, so the sheet looks
     the same no matter what the previous run left behind.
@@ -456,38 +596,48 @@ def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
     }, "userEnteredFormat.verticalAlignment,userEnteredFormat.wrapStrategy,"
        "userEnteredFormat.padding,userEnteredFormat.textFormat")
  
-    # 4. Alternate light background per subaccount + divider line between groups
-    for i, (start, end) in enumerate(groups):
-        if i % 2 == 1:
-            requests_.append({
+    # 4. Subaccount blocks: a colored band row with the subaccount name + SID,
+    #    then its rows, then a thick line before the next subaccount
+    for band, start, end in groups:
+        requests_ += [
+            {
                 "repeatCell": {
-                    "range": grid(sid, start, end, 0, n_cols),
-                    "cell": {"userEnteredFormat": {"backgroundColor": rgb("#F4F6F9")}},
-                    "fields": "userEnteredFormat.backgroundColor",
+                    "range": grid(sid, band, band + 1, 0, n_cols),
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": rgb("#D9E2EE"),
+                        "verticalAlignment": "MIDDLE",
+                        "wrapStrategy": "OVERFLOW_CELL",
+                        "padding": {"left": 6, "right": 6},
+                        "textFormat": {"fontFamily": "Inter", "fontSize": 11, "bold": True,
+                                       "foregroundColor": rgb("#1F3A5F")},
+                    }},
+                    "fields": "userEnteredFormat",
                 }
-            })
-        if i > 0:
-            requests_.append({
-                "updateBorders": {
-                    "range": grid(sid, start, end, 0, n_cols),
-                    "top": {"style": "SOLID", "color": rgb("#C9D1DC")},
-                }
-            })
-        # Subaccount name bold on the first row of the group, grey on the rest
-        requests_.append({
-            "repeatCell": {
-                "range": grid(sid, start, start + 1, 0, 1),
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                "fields": "userEnteredFormat.textFormat.bold",
-            }
-        })
-        if end - start > 1:
-            requests_.append({
+            },
+            {   # Subaccount SID / summary next to the name: smaller and lighter
                 "repeatCell": {
-                    "range": grid(sid, start + 1, end, 0, 1),
+                    "range": grid(sid, band, band + 1, 1, n_cols),
                     "cell": {"userEnteredFormat": {"textFormat": {
-                        "foregroundColor": rgb("#9AA5B1")}}},
-                    "fields": "userEnteredFormat.textFormat.foregroundColor",
+                        "fontFamily": "Roboto Mono", "fontSize": 9, "bold": False,
+                        "foregroundColor": rgb("#52606D")}}},
+                    "fields": "userEnteredFormat.textFormat",
+                }
+            },
+            {
+                "updateBorders": {
+                    "range": grid(sid, band, band + 1, 0, n_cols),
+                    "top": {"style": "SOLID_THICK", "color": rgb("#1F3A5F")},
+                }
+            },
+        ]
+        if end > start and dim_first_col:  # name repeated on data rows, very light
+            requests_.append({
+                "repeatCell": {
+                    "range": grid(sid, start, end, 0, 1),
+                    "cell": {"userEnteredFormat": {
+                        "padding": {"left": 18, "right": 6, "top": 3, "bottom": 3},
+                        "textFormat": {"foregroundColor": rgb("#B0B8C1")}}},
+                    "fields": "userEnteredFormat.padding,userEnteredFormat.textFormat.foregroundColor",
                 }
             })
  
@@ -503,6 +653,10 @@ def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
     for c in wrap_cols:
         col_style(c, c + 1, {"wrapStrategy": "WRAP"}, "userEnteredFormat.wrapStrategy")
  
+    for c in bold_cols:
+        col_style(c, c + 1, {"textFormat": {"bold": True}},
+                  "userEnteredFormat.textFormat.bold")
+ 
     for c in mono_cols:
         col_style(c, c + 1, {"textFormat": {"fontFamily": "Roboto Mono"}},
                   "userEnteredFormat.textFormat.fontFamily")
@@ -513,6 +667,24 @@ def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
             "foregroundColor": rgb("#7B8794")}},
             "userEnteredFormat.textFormat.fontFamily,userEnteredFormat.textFormat.fontSize,"
             "userEnteredFormat.textFormat.foregroundColor")
+ 
+    # Fit row heights to the new content (old heights would otherwise stick
+    # to whatever row now sits there), then make the subaccount bands taller
+    requests_.append({
+        "autoResizeDimensions": {
+            "dimensions": {"sheetId": sid, "dimension": "ROWS",
+                           "startIndex": 1, "endIndex": n_rows},
+        }
+    })
+    for band, _, _ in groups:
+        requests_.append({
+            "updateDimensionProperties": {
+                "range": {"sheetId": sid, "dimension": "ROWS",
+                          "startIndex": band, "endIndex": band + 1},
+                "properties": {"pixelSize": 30},
+                "fields": "pixelSize",
+            }
+        })
  
     # 6. Header
     requests_ += [
@@ -584,6 +756,12 @@ def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
             },
         })
  
+    # Caller-specific highlights (e.g. "ready to move numbers")
+    rules += [{**rule, "ranges": [grid(sid, 1, n_rows, *rule["cols"])]}
+              for rule in extra_rules]
+    for rule in rules:
+        rule.pop("cols", None)
+ 
     status_letter = chr(ord("A") + status_col)
     rules += [
         {   # Whole row tinted red when the campaign failed
@@ -617,24 +795,36 @@ def tab_color_for(statuses):
     return "#2E9E5B"
  
  
-def build_rows(header, groups_data, status_col):
-    """Problems first: sort rows inside each subaccount, then subaccounts by worst status."""
-    for _, sub_rows in groups_data:
-        sub_rows.sort(key=lambda r: (status_rank(r[status_col]), str(r[1])))
+def build_rows(header, groups_data, rank, summary, band_prefix="Subaccount"):
+    """
+    Problems first: sort rows inside each subaccount, then subaccounts by their
+    most urgent row. Each subaccount starts with a band row: name | SID · summary.
+ 
+    groups_data: list of (subaccount_name, subaccount_sid, rows)
+    Returns rows and [(band_row, first_data_row, end_row)].
+    """
+    for _, _, sub_rows in groups_data:
+        sub_rows.sort(key=lambda r: (rank(r), str(r[1])))
  
     groups_data.sort(key=lambda g: (
-        min(status_rank(r[status_col]) for r in g[1]),
+        min((rank(r) for r in g[2]), default=99),
         g[0].lower(),
     ))
  
     rows, groups = [header], []
  
-    for _, sub_rows in groups_data:
-        start = len(rows)
+    for name, sub_sid, sub_rows in groups_data:
+        band = len(rows)
+        rows.append([name, f"{band_prefix} {sub_sid}  ·  {summary(sub_rows)}"]
+                    + [""] * (len(header) - 2))
         rows.extend(sub_rows)
-        groups.append((start, len(rows)))
+        groups.append((band, band + 1, len(rows)))
  
     return rows, groups
+ 
+ 
+def plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
  
  
 # --------------------------------------------------------------------------
@@ -667,9 +857,11 @@ def main():
                              error, reason, numbers, brand, run_at])
  
         def add_number_row(number, friendly, service, status,
-                           caps="—", added="—", pn_sid="—"):
+                           caps="—", added="—", pn_sid="—", next_step=None):
+            if next_step is None:
+                next_step = NEXT_STEPS.get(status, "")
             num_rows.append([sub_name, as_text(number), friendly, service, status,
-                             caps, added, pn_sid, run_at])
+                             next_step, caps, added, pn_sid, run_at])
  
         markdown.append(f"## {sub_name}")
         markdown.append("")
@@ -681,8 +873,8 @@ def main():
             add_number_row("", "—", "—", NO_TOKEN)
             markdown.append("- Could not fetch subaccount auth token")
             markdown.append("")
-            campaign_groups.append((sub_name, sub_rows))
-            number_groups.append((sub_name, num_rows))
+            campaign_groups.append((sub_name, sub_sid, sub_rows))
+            number_groups.append((sub_name, sub_sid, num_rows))
             continue
  
         # Phone Numbers > Inventory
@@ -690,6 +882,9 @@ def main():
  
         # number SID -> [(service name, campaign status)]
         number_links = {}
+ 
+        # Services with an approved campaign but an empty sender pool
+        ready_services = []
  
         services = get_services(sub_sid, sub_token)
  
@@ -707,6 +902,7 @@ def main():
             numbers_cell = as_text(", ".join(
                 n.get("phone_number", "") for n in service_numbers
             ))
+            # Filled in below once we know the campaign status
  
             if not campaigns:
                 add_row(service_name, "—", NO_CAMPAIGN,
@@ -748,20 +944,34 @@ def main():
                         "brandRegistrationSid",
                     )
  
+                    if status == "VERIFIED" and not service_numbers:
+                        cell = READY_TO_MOVE
+                    else:
+                        cell = numbers_cell
+ 
                     add_row(service_name, use_case, status, error_code, reason,
-                            numbers_cell, brand_sid)
+                            cell, brand_sid)
  
                     markdown.append(f"- {service_name} | {use_case} | {status}")
  
                 service_status = worst_status(statuses)
+ 
+                if service_status == "VERIFIED" and not service_numbers:
+                    ready_services.append(service_name)
  
             for n in service_numbers:
                 number_links.setdefault(n.get("sid"), []).append(
                     (service_name, service_status)
                 )
  
+        # Approved campaign, no numbers yet: time to move numbers in
+        for service_name in ready_services:
+            add_number_row("", "—", service_name, "VERIFIED",
+                           next_step=READY_TO_MOVE)
+            markdown.append(f"- {service_name}: VERIFIED, no numbers yet")
+ 
         # One row per number in the inventory
-        if not inventory:
+        if not inventory and not ready_services:
             add_number_row("", "—", "—", NO_NUMBERS)
             markdown.append("- Phone numbers: none")
  
@@ -786,11 +996,72 @@ def main():
             markdown.append(f"- {num.get('phone_number')} | {service} | {status}")
  
         markdown.append("")
-        campaign_groups.append((sub_name, sub_rows))
-        number_groups.append((sub_name, num_rows))
+        campaign_groups.append((sub_name, sub_sid, sub_rows))
+        number_groups.append((sub_name, sub_sid, num_rows))
  
-    rows, groups = build_rows(HEADER, campaign_groups, COL_STATUS)
-    num_rows, num_groups = build_rows(NUMBERS_HEADER, number_groups, N_COL_STATUS)
+    # ---- Main AgVend account: numbers that don't belong to any subaccount ----
+    all_subaccounts = get_subaccounts(apply_filter=False)
+    main_buckets = {status: [] for status in MATCH_GROUPS}
+ 
+    main_links = {}  # number SID -> [service names]
+    for svc in get_services(MASTER_SID, MASTER_TOKEN):
+        for n in get_service_numbers(MASTER_SID, MASTER_TOKEN, svc.get("sid")):
+            main_links.setdefault(n.get("sid"), []).append(svc.get("friendly_name", "—"))
+ 
+    markdown += ["## Main account numbers", ""]
+ 
+    for num in get_incoming_numbers(MASTER_SID, MASTER_TOKEN):
+        friendly = num.get("friendly_name") or ""
+        services = main_links.get(num.get("sid"), [])
+        status, matched, next_step = classify_main_number(friendly, services, all_subaccounts)
+ 
+        main_buckets[status].append([
+            as_text(num.get("phone_number", "")),
+            friendly or "—",
+            ", ".join(services) or "—",
+            status,
+            matched or "—",
+            next_step,
+            format_capabilities(num.get("capabilities")),
+            format_date(num.get("date_created")),
+            num.get("sid", "—"),
+            run_at,
+        ])
+        markdown.append(f"- {num.get('phone_number')} | {friendly} | {status} {matched}")
+ 
+    main_groups = [(MATCH_GROUPS[status], MASTER_SID, bucket)
+                   for status, bucket in main_buckets.items() if bucket]
+ 
+    main_rows, main_groups = build_rows(
+        MAIN_HEADER, main_groups,
+        rank=lambda r: status_rank(r[M_COL_STATUS]),
+        summary=lambda rs: plural(len(rs), "phone number"),
+        band_prefix="Main account",
+    )
+ 
+    rows, groups = build_rows(
+        HEADER, campaign_groups,
+        rank=lambda r: status_rank(r[COL_STATUS]),
+        summary=lambda rs: plural(len({r[1] for r in rs if r[1] != "—"}),
+                                  "messaging service"),
+    )
+ 
+    def number_rank(r):
+        if r[N_COL_NEXT] == READY_TO_MOVE:
+            return 0.5  # right after FAILED
+        return status_rank(r[N_COL_STATUS])
+ 
+    num_rows, num_groups = build_rows(
+        NUMBERS_HEADER, number_groups,
+        rank=number_rank,
+        summary=lambda rs: plural(sum(1 for r in rs if r[N_COL_NUMBER] != "—"),
+                                  "phone number"),
+    )
+ 
+    ready_bg, ready_fg = READY_STYLE
+    ready_format = {"backgroundColor": rgb(ready_bg),
+                    "textFormat": {"foregroundColor": rgb(ready_fg), "bold": True}}
+    next_letter = chr(ord("A") + N_COL_NEXT)
  
     spreadsheet = get_sheet()
  
@@ -806,6 +1077,14 @@ def main():
         wrap_cols=[COL_REASON, COL_NUMBERS],
         mono_cols=[COL_NUMBERS],
         muted_from_col=COL_SID,
+        extra_rules=[{
+            "cols": (COL_NUMBERS, COL_NUMBERS + 1),
+            "booleanRule": {
+                "condition": {"type": "TEXT_EQ",
+                              "values": [{"userEnteredValue": READY_TO_MOVE}]},
+                "format": ready_format,
+            },
+        }],
     )
  
     ws_numbers = ensure_worksheet(spreadsheet, NUMBERS_SHEET_TITLE)
@@ -818,7 +1097,37 @@ def main():
         tab_color=tab_color_for({r[N_COL_STATUS] for r in num_rows[1:]}),
         mono_cols=[N_COL_NUMBER],
         wrap_cols=[N_COL_SERVICE],
+        bold_cols=[N_COL_NEXT],
         muted_from_col=N_COL_SID,
+        extra_rules=[{
+            # Whole row bright blue: approved campaign, no numbers yet
+            "cols": (1, len(NUMBERS_HEADER)),
+            "booleanRule": {
+                "condition": {"type": "CUSTOM_FORMULA",
+                              "values": [{"userEnteredValue":
+                                          f'=${next_letter}2="{READY_TO_MOVE}"'}]},
+                "format": ready_format,
+            },
+        }],
+    )
+ 
+    ws_main = ensure_worksheet(spreadsheet, MAIN_SHEET_TITLE)
+    replace_sheet(ws_main, main_rows if len(main_rows) > 1
+                  else main_rows + [["No phone numbers on the main account"]
+                                    + [""] * (len(MAIN_HEADER) - 1)])
+    main_statuses = {r[M_COL_STATUS] for r in main_rows[1:]}
+    format_sheet(
+        spreadsheet, ws_main, max(len(main_rows), 2), main_groups,
+        header=MAIN_HEADER,
+        widths=MAIN_COLUMN_WIDTHS,
+        status_col=M_COL_STATUS,
+        tab_color=("#D64545" if NO_SUBACCOUNT in main_statuses
+                   else "#E8A33D" if HAS_SUBACCOUNT in main_statuses
+                   else "#2E9E5B"),
+        wrap_cols=[M_COL_SERVICE, M_COL_MATCH],
+        bold_cols=[M_COL_NEXT],
+        muted_from_col=M_COL_SID,
+        dim_first_col=False,
     )
  
     with open("result.md", "w") as f:
