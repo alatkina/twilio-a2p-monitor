@@ -1,4 +1,3 @@
-Twilio a2p monitor · PY
 #!/usr/bin/env python3
  
 import os
