@@ -101,13 +101,18 @@ NO_SUBACCOUNT = "NO SUBACCOUNT"
 HAS_SUBACCOUNT = "SUBACCOUNT EXISTS"
 UNNAMED = "UNNAMED"
 INTERNAL = "INTERNAL"
+GOOSE = "GOOSE ASSISTANT"
  
 MATCH_GROUPS = {
     NO_SUBACCOUNT: "No matching subaccount",
     HAS_SUBACCOUNT: "Partner already has a subaccount",
+    GOOSE: "Goose Assistant",
     UNNAMED: "Can't tell whose number it is",
     INTERNAL: "AgVend internal / test",
 }
+ 
+# Numbers whose name contains this word go to the "Goose Assistant" block
+GOOSE_KEYWORD = "goose"
  
 # Known Friendly Name prefixes on the main account -> subaccount they belong to.
 # Matching ignores case, spaces and punctuation ("the_rack" == "The Rack"),
@@ -179,7 +184,7 @@ PARTNER_ALIASES = {
 }
  
 # Numbers whose name contains one of these are treated as AgVend's own
-INTERNAL_KEYWORDS = ["agvend", "test", "qa", "demo", "sandbox", "internal"]
+INTERNAL_KEYWORDS = ["agvend", "tcp", "test", "qa", "demo", "sandbox", "internal"]
  
 # Words that say nothing about the partner and are ignored when matching names
 NAME_STOP_WORDS = {
@@ -215,8 +220,9 @@ STATUS_RANK = {
     "VERIFIED": 4,
     NO_SUBACCOUNT: 0,
     HAS_SUBACCOUNT: 1,
-    UNNAMED: 2,
-    INTERNAL: 3,
+    GOOSE: 2,
+    UNNAMED: 3,
+    INTERNAL: 4,
 }
  
 STATUS_STYLES = [
@@ -234,6 +240,7 @@ STATUS_STYLES = [
     (HAS_SUBACCOUNT, "#FFE3CC", "#9C4A00"),
     (UNNAMED, "#ECEFF3", "#616E7C"),
     (INTERNAL, "#ECEFF3", "#616E7C"),
+    (GOOSE, "#EDE7F6", "#5E35B1"),
 ]
  
  
@@ -448,8 +455,25 @@ def classify_main_number(friendly, service_names, subaccounts):
     match_label is the subaccount name when we know whose number it is.
     """
     texts = [t for t in [friendly] + list(service_names) if t]
+    blob = " ".join(texts).lower()
+ 
+    def has_word(word):
+        # whole word, where "_" and "-" also count as separators ("tcp_main", "TCP-1")
+        return re.search(rf"(?<![a-z0-9]){word}(?![a-z0-9])", blob) is not None
  
     partner = alias_partner(texts)
+ 
+    # Goose Assistant numbers: own block, still showing whose they are
+    if GOOSE_KEYWORD in blob:
+        if partner:
+            sub_name = find_subaccount(partner, subaccounts)
+            return GOOSE, sub_name or f"{partner} (no subaccount)", ""
+        return GOOSE, GOOSE, ""
+ 
+    # AgVend's own numbers (TCP, test, QA...) before partner matching
+    if any(has_word(k) for k in INTERNAL_KEYWORDS):
+        return INTERNAL, INTERNAL, ""
+ 
     if partner:
         sub_name = find_subaccount(partner, subaccounts)
         if sub_name:
@@ -457,10 +481,6 @@ def classify_main_number(friendly, service_names, subaccounts):
                     "Check: should it move to that subaccount?")
         return (NO_SUBACCOUNT, f"{partner} (no subaccount)",
                 "Create a subaccount for this partner?")
- 
-    blob = " ".join(texts).lower()
-    if any(re.search(rf"\b{k}\b", blob) for k in INTERNAL_KEYWORDS):
-        return INTERNAL, INTERNAL, ""
  
     if not any(has_letters(t) and name_tokens(t) for t in texts):
         return UNNAMED, UNNAMED, "Give the number a partner name to identify it"
