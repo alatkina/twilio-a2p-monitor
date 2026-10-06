@@ -102,6 +102,7 @@ HAS_SUBACCOUNT = "SUBACCOUNT EXISTS"
 UNNAMED = "UNNAMED"
 INTERNAL = "INTERNAL"
 GOOSE = "GOOSE ASSISTANT"
+RETIRING = "TO BE DELETED"
  
 MATCH_GROUPS = {
     NO_SUBACCOUNT: "No matching subaccount",
@@ -109,7 +110,19 @@ MATCH_GROUPS = {
     GOOSE: "Goose Assistant",
     UNNAMED: "Can't tell whose number it is",
     INTERNAL: "AgVend internal / test",
+    RETIRING: "Scheduled for removal",
 }
+ 
+# Manual decisions for specific numbers, matched by Friendly Name prefix
+# (case, spaces and punctuation ignored). Checked before anything else.
+#   (name prefix, block, Match Status text, Next Step text)
+MANUAL_OVERRIDES = [
+    ("toll-free - do NOT use", "INTERNAL", "INTERNAL", ""),
+    ("Local DEV - Conversation Agent", "INTERNAL", "INTERNAL", ""),
+    ("ICI - Marketing", "TO BE DELETED",
+     "Will be deleted on Nov 30, 2026 · no subaccount needed",
+     "Delete on Nov 30, 2026"),
+]
  
 # Numbers whose name contains this word go to the "Goose Assistant" block
 GOOSE_KEYWORD = "goose"
@@ -161,6 +174,7 @@ PARTNER_ALIASES = {
     "Mercer Landmark": ["mercer_landmark"],
     "Mid Kansas Cooperative": ["mkc"],
     "Midway Coop": ["midwaycoop"],
+    "NEW Cooperative": ["NEW Cooperative"],
     "Nexus Cooperative": ["Nexus"],
     "NuWay-K&H Cooperative": ["Nuway"],
     "Premier Ag": ["premier_comp"],  # probable match
@@ -192,7 +206,7 @@ NAME_STOP_WORDS = {
     "of", "and", "cooperative", "coop", "cooperatives", "partners", "group",
     "messaging", "service", "services", "a2p", "sms", "mms", "default",
     "marketing", "account", "notification", "notifications", "conversations",
-    "for", "number", "numbers", "phone", "main", "primary", "new", "old",
+    "for", "number", "numbers", "phone",
 }
  
 # "Next Step" hints on the Phone Numbers tab
@@ -223,6 +237,7 @@ STATUS_RANK = {
     GOOSE: 2,
     UNNAMED: 3,
     INTERNAL: 4,
+    RETIRING: 5,
 }
  
 STATUS_STYLES = [
@@ -241,6 +256,7 @@ STATUS_STYLES = [
     (UNNAMED, "#ECEFF3", "#616E7C"),
     (INTERNAL, "#ECEFF3", "#616E7C"),
     (GOOSE, "#EDE7F6", "#5E35B1"),
+    (RETIRING, "#F1F1F1", "#8A8F98"),
 ]
  
  
@@ -460,6 +476,12 @@ def classify_main_number(friendly, service_names, subaccounts):
     def has_word(word):
         # whole word, where "_" and "-" also count as separators ("tcp_main", "TCP-1")
         return re.search(rf"(?<![a-z0-9]){word}(?![a-z0-9])", blob) is not None
+ 
+    # Manual decisions win over everything else
+    friendly_key = squash(friendly)
+    for prefix, block, label, next_step in MANUAL_OVERRIDES:
+        if friendly_key and friendly_key.startswith(squash(prefix)):
+            return block, label, next_step
  
     partner = alias_partner(texts)
  
