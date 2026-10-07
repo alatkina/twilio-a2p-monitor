@@ -56,11 +56,15 @@ NUMBER_TYPES = [
     ("Cash Bids", ["cashbid", "cash bid"]),
     ("Marketing", ["market"]),
     ("Sales / CRM", ["sales", "crm"]),
-    ("Account Notifications", ["notification"]),
     ("System", ["system"]),
     ("Goose", ["goose"]),
 ]
 OTHER_TYPE = "Other"
+ 
+# Numbers whose type can't be read from the name: phone number -> column(s)
+NUMBER_TYPE_OVERRIDES = {
+    "+12084909353": ["Sales / CRM"],  # Valley Wide Cooperative CRM
+}
 TYPE_COLUMNS = [label for label, _ in NUMBER_TYPES] + [OTHER_TYPE]
  
 NUMBERS_HEADER = (
@@ -189,6 +193,10 @@ PARTNER_ALIASES = {
     "Mid Kansas Cooperative": ["mkc"],
     "Midway Coop": ["midwaycoop"],
     "NEW Cooperative": ["NEW Cooperative"],
+    "Agtegra": ["Agtegra"],
+    "Enerbase Coop": ["Enerbase"],
+    "FCD": ["FCD"],
+    "Parallel Ag Group": ["Parallel Ag"],
     "Nexus Cooperative": ["Nexus"],
     "NuWay-K&H Cooperative": ["Nuway"],
     "Premier Ag": ["premier_comp"],  # probable match
@@ -455,6 +463,25 @@ def alias_partner(texts):
     return best
  
  
+def guess_partner_name(friendly):
+    """
+    "Agtegra - Marketing" -> "Agtegra", "Enerbase Coop Sales" -> "Enerbase Coop".
+    Used for numbers on the main account whose partner has no subaccount and is
+    not in PARTNER_ALIASES yet, so they still get a row on the Phone Numbers tab.
+    """
+    if not has_letters(friendly):
+        return None
+ 
+    name = re.split(r"\s+-\s+|\s*\[", friendly)[0].strip()
+    type_words = {w for _, words in NUMBER_TYPES for w in words} | {"cash", "bids"}
+    words = name.split()
+    keys = {squash(w) for w in type_words}
+    while words and any(squash(words[-1]).startswith(k) for k in keys):
+        words.pop()
+    name = " ".join(words).strip(" -_/")
+    return name or None
+ 
+ 
 def find_subaccount(partner, subaccounts):
     """The real subaccount name for a partner, or None if there is no such subaccount."""
     key = squash(partner)
@@ -482,8 +509,11 @@ def is_internal_subaccount(name):
     return any(has_word(name, k) for k in INTERNAL_KEYWORDS)
  
  
-def number_types(friendly, service_names):
+def number_types(friendly, service_names, phone=""):
     """Column(s) of the Phone Numbers tab this number belongs to."""
+    if phone in NUMBER_TYPE_OVERRIDES:
+        return list(NUMBER_TYPE_OVERRIDES[phone])
+ 
     def found(text):
         key = squash(text)
         return [label for label, words in NUMBER_TYPES
@@ -1203,7 +1233,7 @@ def main():
  
             text = num.get("phone_number", "")
             notes = []
-            types = number_types(friendly, linked)
+            types = number_types(friendly, linked, num.get("phone_number", ""))
             if "Goose" in types and environment(friendly):
                 notes.append(environment(friendly))
             if not linked:
@@ -1243,13 +1273,15 @@ def main():
             friendly, services, all_subaccounts)
         main_category[num.get("sid", "—")] = status
  
-        types = number_types(friendly, services)
+        types = number_types(friendly, services, num.get("phone_number", ""))
  
         # Phone Numbers tab: show this number in its partner's row, marked "on main".
         # Partners from PARTNER_ALIASES without a subaccount get a row of their own.
         targets = list(subs)
         if not targets and status in (NO_SUBACCOUNT, GOOSE):
             partner = alias_partner([t for t in [friendly] + services if t])
+            if not partner and status == NO_SUBACCOUNT:
+                partner = guess_partner_name(friendly)
             if partner:
                 targets = [partner]
                 if partner not in pivot_by_name:
