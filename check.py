@@ -516,10 +516,16 @@ def number_types(friendly, service_names, phone=""):
     if phone in NUMBER_TYPE_OVERRIDES:
         return list(NUMBER_TYPE_OVERRIDES[phone])
  
+    def words_of(text):
+        return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+ 
     def found(text):
-        key = squash(text)
+        # A type word must START a word: "Marketing", "CashBids" and "Nexus Market"
+        # count, but "sales" inside "Reichmansales" does not.
+        norm = words_of(text)
         return [label for label, words in NUMBER_TYPES
-                if any(squash(w) in key for w in words)]
+                if any(re.search(r"(?<![a-z0-9])" + re.escape(words_of(w)), norm)
+                       for w in words)]
  
     types = found(friendly)
     if not types:
