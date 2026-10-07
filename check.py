@@ -55,9 +55,8 @@ COLUMN_WIDTHS = [230, 270, 175, 135, 90, 440, 200, 290, 150]
 NUMBER_TYPES = [
     ("Cash Bids", ["cashbid", "cash bid"]),
     ("Marketing", ["market"]),
-    ("Sales", ["sales"]),
+    ("Sales / CRM", ["sales", "crm"]),
     ("Account Notifications", ["notification"]),
-    ("CRM", ["crm"]),
     ("System", ["system"]),
     ("Goose", ["goose"]),
 ]
@@ -65,18 +64,17 @@ OTHER_TYPE = "Other"
 TYPE_COLUMNS = [label for label, _ in NUMBER_TYPES] + [OTHER_TYPE]
  
 NUMBERS_HEADER = (
-    ["Subaccount Name", "Total Numbers"]
+    ["Subaccount Name", "Numbers in Subaccount"]
     + TYPE_COLUMNS
-    + ["Still on Main Account", "Subaccount SID", "Run Date"]
+    + ["Subaccount SID", "Run Date"]
 )
  
-N_COL_TOTAL = NUMBERS_HEADER.index("Total Numbers")
+N_COL_TOTAL = NUMBERS_HEADER.index("Numbers in Subaccount")
 N_COL_FIRST_TYPE = NUMBERS_HEADER.index(TYPE_COLUMNS[0])
 N_COL_LAST_TYPE = NUMBERS_HEADER.index(OTHER_TYPE)
-N_COL_ON_MAIN = NUMBERS_HEADER.index("Still on Main Account")
 N_COL_SID = NUMBERS_HEADER.index("Subaccount SID")
  
-NUMBERS_COLUMN_WIDTHS = ([230, 90] + [205] * len(TYPE_COLUMNS) + [150, 290, 150])
+NUMBERS_COLUMN_WIDTHS = ([230, 110] + [215] * len(TYPE_COLUMNS) + [290, 150])
  
 NOT_IN_SERVICE_MARK = "not in service"
 ON_MAIN_MARK = "on main"
@@ -746,7 +744,8 @@ def existing_conditional_rule_count(spreadsheet, sheet_id):
 def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
                  status_col, tab_color, center_cols=(), wrap_cols=(),
                  mono_cols=(), muted_from_col=None, bold_cols=(), extra_rules=(),
-                 dim_first_col=True, cell_fills=(), muted_rows=()):
+                 dim_first_col=True, cell_fills=(), muted_rows=(),
+                 zebra=False, grid_lines=False, first_col_fill=None):
     """
     Re-applies all formatting from scratch on every run, so the sheet looks
     the same no matter what the previous run left behind.
@@ -872,6 +871,38 @@ def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
                     "textFormat": {"foregroundColor": rgb(fg), "bold": True}}},
                 "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor,"
                           "userEnteredFormat.textFormat.bold",
+            }
+        })
+ 
+    # Alternating row background, so neighbouring subaccounts don't blend
+    if zebra:
+        for r in range(2, n_rows, 2):
+            requests_.append({
+                "repeatCell": {
+                    "range": grid(sid, r, r + 1, 0, n_cols),
+                    "cell": {"userEnteredFormat": {"backgroundColor": rgb("#F2F5F9")}},
+                    "fields": "userEnteredFormat.backgroundColor",
+                }
+            })
+ 
+    # Name column tinted so it reads as a row label
+    if first_col_fill:
+        requests_.append({
+            "repeatCell": {
+                "range": grid(sid, 1, n_rows, 0, 1),
+                "cell": {"userEnteredFormat": {"backgroundColor": rgb(first_col_fill)}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        })
+ 
+    # Thin lines between every row and column
+    if grid_lines and n_rows > 1:
+        line = {"style": "SOLID", "color": rgb("#D5DCE4")}
+        requests_.append({
+            "updateBorders": {
+                "range": data,
+                "top": line, "bottom": line, "left": line, "right": line,
+                "innerHorizontal": line, "innerVertical": line,
             }
         })
  
@@ -1194,7 +1225,7 @@ def main():
     # ---- Main AgVend account: numbers not moved to a subaccount yet ----
     all_subaccounts = get_subaccounts(apply_filter=False)
     main_buckets = {status: [] for status in MATCH_GROUPS}
-    still_on_main = {}  # subaccount name -> how many of its numbers are on main
+    pivot_by_name = {p["name"]: p for p in number_pivot}
  
     main_links = {}  # number SID -> [service names]
     for svc in get_services(MASTER_SID, MASTER_TOKEN):
@@ -1212,10 +1243,32 @@ def main():
             friendly, services, all_subaccounts)
         main_category[num.get("sid", "—")] = status
  
-        for name in subs:
-            still_on_main[name] = still_on_main.get(name, 0) + 1
- 
         types = number_types(friendly, services)
+ 
+        # Phone Numbers tab: show this number in its partner's row, marked "on main".
+        # Partners from PARTNER_ALIASES without a subaccount get a row of their own.
+        targets = list(subs)
+        if not targets and status in (NO_SUBACCOUNT, GOOSE):
+            partner = alias_partner([t for t in [friendly] + services if t])
+            if partner:
+                targets = [partner]
+                if partner not in pivot_by_name:
+                    pivot_by_name[partner] = {
+                        "name": partner, "sid": "—", "total": NO_SUBACCOUNT,
+                        "types": {col: [] for col in TYPE_COLUMNS}, "no_access": False,
+                    }
+                    number_pivot.append(pivot_by_name[partner])
+ 
+        notes = []
+        if "Goose" in types and environment(friendly):
+            notes.append(environment(friendly))
+        notes.append(ON_MAIN_MARK)
+        cell_text = num.get("phone_number", "") + "  · " + " · ".join(notes)
+ 
+        for name in targets:
+            if name in pivot_by_name:  # (skipped when the run is filtered to one account)
+                for t in types:
+                    pivot_by_name[name]["types"][t].append(cell_text)
         type_cell = ", ".join(types)
         if "Goose" in types and environment(friendly):
             type_cell += f" ({environment(friendly)})"
@@ -1265,8 +1318,11 @@ def main():
                                   "messaging service"),
     )
  
-    # ---- Phone Numbers rows: one per subaccount, alphabetical, QA/test last ----
-    number_pivot.sort(key=lambda p: (is_internal_subaccount(p["name"]), p["name"].lower()))
+    # ---- Phone Numbers rows: one per subaccount ----
+    # Partners that still need a subaccount first, then A-Z, QA/test last
+    number_pivot.sort(key=lambda p: (is_internal_subaccount(p["name"]),
+                                     p["total"] != NO_SUBACCOUNT,
+                                     p["name"].lower()))
  
     num_rows = [NUMBERS_HEADER]
     muted = []
@@ -1275,12 +1331,11 @@ def main():
         if is_internal_subaccount(p["name"]):
             muted.append(len(num_rows))
  
-        on_main = still_on_main.get(p["name"], 0)
         num_rows.append(
             [p["name"], "no access" if p["no_access"] else p["total"]]
             + [as_text("\n".join(p["types"][col])) if p["types"][col] else ""
                for col in TYPE_COLUMNS]
-            + [f"{on_main} {ON_MAIN_MARK}" if on_main else "", p["sid"], run_at]
+            + [p["sid"], run_at]
         )
  
     ready_bg, ready_fg = READY_STYLE
@@ -1313,21 +1368,35 @@ def main():
     type_cols = (N_COL_FIRST_TYPE, N_COL_LAST_TYPE + 1)
     ws_numbers = ensure_worksheet(spreadsheet, NUMBERS_SHEET_TITLE)
     replace_sheet(ws_numbers, num_rows)
+    pivot_text = [str(c) for r in num_rows[1:] for c in r]
     format_sheet(
         spreadsheet, ws_numbers, len(num_rows), [],
         header=NUMBERS_HEADER,
         widths=NUMBERS_COLUMN_WIDTHS,
         status_col=N_COL_TOTAL,
-        tab_color=("#E8A33D" if any(NOT_IN_SERVICE_MARK in str(c)
-                                    for r in num_rows[1:] for c in r)
+        tab_color=("#D64545" if NO_SUBACCOUNT in pivot_text
+                   else "#E8A33D" if any(ON_MAIN_MARK in c or NOT_IN_SERVICE_MARK in c
+                                         for c in pivot_text)
                    else "#2E9E5B"),
-        center_cols=[N_COL_ON_MAIN],
         wrap_cols=list(range(*type_cols)),
         mono_cols=list(range(*type_cols)),
         bold_cols=[0],
         muted_from_col=N_COL_SID,
         muted_rows=muted,
+        zebra=True,
+        grid_lines=True,
+        first_col_fill="#E6ECF3",
         extra_rules=[
+            {   # still on the main account: needs moving (or a subaccount first)
+                "cols": type_cols,
+                "booleanRule": {
+                    "condition": {"type": "TEXT_CONTAINS",
+                                  "values": [{"userEnteredValue": ON_MAIN_MARK}]},
+                    "format": {"backgroundColor": rgb("#FFF1C2"),
+                               "textFormat": {"foregroundColor": rgb("#8A6100"),
+                                              "bold": True}},
+                },
+            },
             {   # number not attached to any Messaging Service
                 "cols": type_cols,
                 "booleanRule": {
@@ -1335,16 +1404,6 @@ def main():
                                   "values": [{"userEnteredValue": NOT_IN_SERVICE_MARK}]},
                     "format": {"backgroundColor": rgb("#FFE3CC"),
                                "textFormat": {"foregroundColor": rgb("#9C4A00")}},
-                },
-            },
-            {   # partner still has numbers on the main account
-                "cols": (N_COL_ON_MAIN, N_COL_ON_MAIN + 1),
-                "booleanRule": {
-                    "condition": {"type": "TEXT_CONTAINS",
-                                  "values": [{"userEnteredValue": ON_MAIN_MARK}]},
-                    "format": {"backgroundColor": rgb("#FFE3CC"),
-                               "textFormat": {"foregroundColor": rgb("#9C4A00"),
-                                              "bold": True}},
                 },
             },
             {   # subaccount without any numbers
