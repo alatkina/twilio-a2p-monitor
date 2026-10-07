@@ -57,7 +57,7 @@ NUMBER_TYPES = [
     ("Marketing", ["market"]),
     ("Sales / CRM", ["sales", "crm"]),
     ("System", ["system"]),
-    ("Goose", ["goose"]),
+    ("Goose", ["goose", "conversation agent"]),
 ]
 OTHER_TYPE = "Other"
  
@@ -143,7 +143,7 @@ MANUAL_OVERRIDES = [
 ]
  
 # Numbers whose name contains this word go to the "Goose Assistant" block
-GOOSE_KEYWORD = "goose"
+GOOSE_KEYWORDS = ["goose", "conversation agent"]
  
 # Known Friendly Name prefixes on the main account -> subaccount they belong to.
 # Matching ignores case, spaces and punctuation ("the_rack" == "The Rack"),
@@ -552,7 +552,7 @@ def classify_main_number(friendly, service_names, subaccounts):
     partner = alias_partner(texts)
  
     # Goose Assistant numbers: own block, still showing whose they are
-    if GOOSE_KEYWORD in blob:
+    if any(squash(k) in squash(blob) for k in GOOSE_KEYWORDS):
         if partner:
             sub_name = find_subaccount(partner, subaccounts)
             return (GOOSE, sub_name or f"{partner} (no subaccount)", "",
