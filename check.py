@@ -65,7 +65,9 @@ OTHER_TYPE = "Other"
 NUMBER_TYPE_OVERRIDES = {
     "+12084909353": ["Sales / CRM"],  # Valley Wide Cooperative CRM
 }
-TYPE_COLUMNS = [label for label, _ in NUMBER_TYPES] + [OTHER_TYPE]
+# Numbers of no known type are not shown in a column; the count cell says
+# "(N untyped)" instead, so they don't go unnoticed.
+TYPE_COLUMNS = [label for label, _ in NUMBER_TYPES]
  
 NUMBERS_HEADER = (
     ["Subaccount Name", "Numbers in Subaccount"]
@@ -75,7 +77,7 @@ NUMBERS_HEADER = (
  
 N_COL_TOTAL = NUMBERS_HEADER.index("Numbers in Subaccount")
 N_COL_FIRST_TYPE = NUMBERS_HEADER.index(TYPE_COLUMNS[0])
-N_COL_LAST_TYPE = NUMBERS_HEADER.index(OTHER_TYPE)
+N_COL_LAST_TYPE = NUMBERS_HEADER.index(TYPE_COLUMNS[-1])
 N_COL_SID = NUMBERS_HEADER.index("Subaccount SID")
  
 NUMBERS_COLUMN_WIDTHS = ([230, 110] + [215] * len(TYPE_COLUMNS) + [290, 150])
@@ -936,16 +938,27 @@ def format_sheet(spreadsheet, ws, n_rows, groups, *, header, widths,
             }
         })
  
-    # QA / test rows: grey italic
+    # QA / test rows: small grey italic on one line, set apart from partners
     for r in muted_rows:
         requests_.append({
             "repeatCell": {
                 "range": grid(sid, r, r + 1, 0, n_cols),
                 "cell": {"userEnteredFormat": {
                     "backgroundColor": rgb("#F6F7F9"),
-                    "textFormat": {"italic": True, "foregroundColor": rgb("#8A94A0")}}},
-                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.italic,"
-                          "userEnteredFormat.textFormat.foregroundColor",
+                    "wrapStrategy": "OVERFLOW_CELL",
+                    "textFormat": {"italic": True, "bold": False, "fontSize": 9,
+                                   "fontFamily": "Inter",
+                                   "foregroundColor": rgb("#8A94A0")}}},
+                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.wrapStrategy,"
+                          "userEnteredFormat.textFormat",
+            }
+        })
+    if muted_rows:
+        first = min(muted_rows)
+        requests_.append({
+            "updateBorders": {
+                "range": grid(sid, first, first + 1, 0, n_cols),
+                "top": {"style": "SOLID_MEDIUM", "color": rgb("#9AA5B1")},
             }
         })
  
@@ -1136,7 +1149,8 @@ def main():
         sub_name = sub.get("friendly_name", "—")
         sub_rows = []
         pivot = {"name": sub_name, "sid": sub_sid, "total": 0,
-                 "types": {col: [] for col in TYPE_COLUMNS}, "no_access": False}
+                 "types": {col: [] for col in TYPE_COLUMNS}, "no_access": False,
+                 "all": [], "untyped": 0}
  
         def add_row(service, use_case, status, error="", reason="",
                     numbers="—", brand="—"):
@@ -1242,7 +1256,11 @@ def main():
                 text += "  · " + " · ".join(notes)
  
             for t in types:
-                pivot["types"][t].append(text)
+                if t in pivot["types"]:
+                    pivot["types"][t].append(text)
+            if types == [OTHER_TYPE]:
+                pivot["untyped"] += 1
+            pivot["all"].append(num.get("phone_number", ""))
             pivot["total"] += 1
  
             markdown.append(f"- {num.get('phone_number')} | {', '.join(types)} | "
@@ -1288,6 +1306,7 @@ def main():
                     pivot_by_name[partner] = {
                         "name": partner, "sid": "—", "total": NO_SUBACCOUNT,
                         "types": {col: [] for col in TYPE_COLUMNS}, "no_access": False,
+                        "all": [], "untyped": 0,
                     }
                     number_pivot.append(pivot_by_name[partner])
  
@@ -1300,7 +1319,8 @@ def main():
         for name in targets:
             if name in pivot_by_name:  # (skipped when the run is filtered to one account)
                 for t in types:
-                    pivot_by_name[name]["types"][t].append(cell_text)
+                    if t in pivot_by_name[name]["types"]:
+                        pivot_by_name[name]["types"][t].append(cell_text)
         type_cell = ", ".join(types)
         if "Goose" in types and environment(friendly):
             type_cell += f" ({environment(friendly)})"
@@ -1360,11 +1380,26 @@ def main():
     muted = []
  
     for p in number_pivot:
+        # QA / test subaccounts: one quiet line, numbers listed in a row
         if is_internal_subaccount(p["name"]):
             muted.append(len(num_rows))
+            listed = ", ".join(p["all"]) if p["all"] else "no numbers"
+            num_rows.append(
+                [p["name"], p["total"], f"QA / test numbers: {listed}"]
+                + [""] * (len(TYPE_COLUMNS) - 1)
+                + [p["sid"], run_at]
+            )
+            continue
+ 
+        if p["no_access"]:
+            count = "no access"
+        elif p.get("untyped"):
+            count = f"{p['total']} ({p['untyped']} untyped)"
+        else:
+            count = p["total"]
  
         num_rows.append(
-            [p["name"], "no access" if p["no_access"] else p["total"]]
+            [p["name"], count]
             + [as_text("\n".join(p["types"][col])) if p["types"][col] else ""
                for col in TYPE_COLUMNS]
             + [p["sid"], run_at]
