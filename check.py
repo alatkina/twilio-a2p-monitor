@@ -122,6 +122,9 @@ MANUAL_OVERRIDES = [
     ("ICI - Marketing", "TO BE DELETED",
      "Will be deleted on Nov 30, 2026 · no subaccount needed",
      "Delete on Nov 30, 2026"),
+    ("ICI - Sales", "TO BE DELETED",
+     "Will be deleted on Nov 30, 2026 · no subaccount needed",
+     "Delete on Nov 30, 2026"),
 ]
  
 # Numbers whose name contains this word go to the "Goose Assistant" block
@@ -378,9 +381,10 @@ def format_date(value):
     if not value:
         return "—"
     try:
-        return parsedate_to_datetime(value).strftime("%Y-%m-%d")
+        # leading apostrophe: stored as text, so Sheets can't turn it into 45068
+        return "'" + parsedate_to_datetime(value).strftime("%Y-%m-%d")
     except (TypeError, ValueError):
-        return str(value)[:10]
+        return "'" + str(value)[:10]
  
  
 def name_tokens(text):
@@ -501,8 +505,8 @@ def classify_main_number(friendly, service_names, subaccounts):
         if sub_name:
             return (HAS_SUBACCOUNT, sub_name,
                     "Check: should it move to that subaccount?")
-        return (NO_SUBACCOUNT, f"{partner} (no subaccount)",
-                "Create a subaccount for this partner?")
+        return (NO_SUBACCOUNT, NO_SUBACCOUNT,
+                f"Create a subaccount for {partner}?")
  
     if not any(has_letters(t) and name_tokens(t) for t in texts):
         return UNNAMED, UNNAMED, "Give the number a partner name to identify it"
