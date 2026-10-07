@@ -199,6 +199,7 @@ PARTNER_ALIASES = {
     "Enerbase Coop": ["Enerbase"],
     "FCD": ["FCD"],
     "Parallel Ag Group": ["Parallel Ag"],
+    "United Agronomy, LLC": ["United Agronomy"],
     "Nexus Cooperative": ["Nexus"],
     "NuWay-K&H Cooperative": ["Nuway"],
     "Premier Ag": ["premier_comp"],  # probable match
@@ -231,6 +232,14 @@ NAME_STOP_WORDS = {
     "messaging", "service", "services", "a2p", "sms", "mms", "default",
     "marketing", "account", "notification", "notifications", "conversations",
     "for", "number", "numbers", "phone",
+}
+ 
+# Words too common to identify a partner on their own (used by name matching)
+GENERIC_NAME_WORDS = {
+    "united", "farmers", "country", "valley", "central", "legacy", "pro",
+    "ag", "agri", "agro", "producers", "river", "superior", "premier", "midway",
+    "five", "star", "south", "west", "north", "east", "heartland", "frontier",
+    "landmark", "partners", "farm", "farmer", "grain", "feed", "fuel", "fuels",
 }
  
 # "Next Step" hints on the Phone Numbers tab
@@ -430,6 +439,11 @@ def match_subaccounts(texts, subaccounts):
         name = sub.get("friendly_name", "")
         sub_tokens = set(name_tokens(name))
         if not sub_tokens:
+            continue
+ 
+        # A one-word name like "United" (United Cooperative) is too common to
+        # match on: "United Agronomy" is a different partner.
+        if len(sub_tokens) == 1 and next(iter(sub_tokens)) in GENERIC_NAME_WORDS:
             continue
  
         # Every meaningful word of the subaccount name appears in the number's name
@@ -1320,6 +1334,8 @@ def main():
         if "Goose" in types and environment(friendly):
             notes.append(environment(friendly))
         notes.append(ON_MAIN_MARK)
+        if friendly:  # so it's clear which number this is
+            notes.append(friendly)
         cell_text = num.get("phone_number", "") + "  · " + " · ".join(notes)
  
         for name in targets:
