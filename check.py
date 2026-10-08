@@ -1141,6 +1141,20 @@ def build_rows(header, groups_data, rank, summary, band_prefix="Subaccount",
     return rows, groups
  
  
+def pivot_cell(entries):
+    """
+    One cell of the Phone Numbers tab. With a single number just the number;
+    with several numbers of the same type each line also says what it is
+    ("+1306…  · FCL Marketing - West"), so it's clear why there are several.
+    """
+    if not entries:
+        return ""
+    if len(entries) == 1:
+        return as_text(entries[0][0])
+    lines = [text + (f"  · {label}" if label else "") for text, label in entries]
+    return as_text("\n".join(lines))
+ 
+ 
 def plural(n, word):
     return f"{n} {word}" + ("" if n == 1 else "s")
  
@@ -1279,7 +1293,9 @@ def main():
  
             for t in types:
                 if t in pivot["types"]:
-                    pivot["types"][t].append(text)
+                    # (cell text, explanation shown only when the cell has several numbers)
+                    label = friendly if has_letters(friendly) else ", ".join(linked)
+                    pivot["types"][t].append((text, label))
             if types == [OTHER_TYPE]:
                 pivot["untyped"] += 1
             pivot["all"].append(num.get("phone_number", ""))
@@ -1344,7 +1360,8 @@ def main():
             if name in pivot_by_name:  # (skipped when the run is filtered to one account)
                 for t in types:
                     if t in pivot_by_name[name]["types"]:
-                        pivot_by_name[name]["types"][t].append(cell_text)
+                        # the name is already part of cell_text
+                        pivot_by_name[name]["types"][t].append((cell_text, ""))
         type_cell = ", ".join(types)
         if "Goose" in types and environment(friendly):
             type_cell += f" ({environment(friendly)})"
@@ -1424,8 +1441,7 @@ def main():
  
         num_rows.append(
             [p["name"], count]
-            + [as_text("\n".join(p["types"][col])) if p["types"][col] else ""
-               for col in TYPE_COLUMNS]
+            + [pivot_cell(p["types"][col]) for col in TYPE_COLUMNS]
             + [p["sid"], run_at]
         )
  
