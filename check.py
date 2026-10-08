@@ -136,6 +136,8 @@ MATCH_GROUPS = {
 MANUAL_OVERRIDES = [
     ("toll-free - do NOT use", "INTERNAL", "INTERNAL", ""),
     ("Local DEV - Conversation Agent", "INTERNAL", "INTERNAL", ""),
+    # AgVend's own Nexus Market number, not a partner's (unrelated to Nexus Cooperative)
+    ("Nexus Market", "INTERNAL", "INTERNAL", ""),
     ("ICI - Marketing", "TO BE DELETED",
      "Will be deleted on Nov 30, 2026 · no subaccount needed",
      "Delete on Nov 30, 2026"),
