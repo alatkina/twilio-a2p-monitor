@@ -198,7 +198,7 @@ PARTNER_ALIASES = {
     "Midway Coop": ["midwaycoop"],
     "NEW Cooperative": ["NEW Cooperative"],
     "Agtegra": ["Agtegra"],
-    "Enerbase Coop": ["Enerbase"],
+    "Enerbase Cooperative Resources": ["Enerbase"],  # numbers are named "Enerbase Coop ..."
     "FCD": ["FCD"],
     "Parallel Ag Group": ["Parallel Ag"],
     "United Agronomy, LLC": ["United Agronomy"],
