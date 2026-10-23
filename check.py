@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
  
 import os
@@ -144,6 +145,10 @@ MANUAL_OVERRIDES = [
     ("ICI - Sales", "TO BE DELETED",
      "Will be deleted on Nov 30, 2026 · no subaccount needed",
      "Delete on Nov 30, 2026"),
+    # Parallel told us they will not renew; contract ends Nov 13, 2026
+    ("Parallel Ag", "TO BE DELETED",
+     "Not renewing: contract ends Nov 13, 2026 · no subaccount needed",
+     "Release after Nov 13, 2026"),
 ]
  
 # Numbers whose name contains this word go to the "Goose Assistant" block
@@ -200,7 +205,6 @@ PARTNER_ALIASES = {
     "Agtegra": ["Agtegra"],
     "Enerbase Cooperative Resources": ["Enerbase"],  # numbers are named "Enerbase Coop ..."
     "FCD": ["FCD"],
-    "Parallel Ag Group": ["Parallel Ag"],
     "United Agronomy, LLC": ["United Agronomy"],
     "Nexus Cooperative": ["Nexus"],
     "NuWay-K&H Cooperative": ["Nuway"],
