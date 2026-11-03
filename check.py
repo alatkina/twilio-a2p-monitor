@@ -82,7 +82,33 @@ N_COL_SID = NUMBERS_HEADER.index("Subaccount SID")
 
 NUMBERS_COLUMN_WIDTHS = ([230, 110] + [215] * len(TYPE_COLUMNS) + [290, 150])
 
-NOT_IN_SERVICE_MARK = "not in service"
+# Marks on the Phone Numbers tab (also used to colour the cells)
+NOT_IN_SERVICE_MARK = "not in service"          # no Messaging Service, no webhook
+WEBHOOK_ONLY_MARK = "webhook only, no service"  # works, but not tied to an A2P campaign
+WRONG_SERVICE_MARK = "wrong service"            # e.g. Marketing number in Account Notification
+CAMPAIGN_FAILED_MARK = "campaign FAILED"
+CAMPAIGN_PENDING_MARK = "campaign pending"
+NO_CAMPAIGN_MARK = "service has no campaign"
+CA_MARK = "CA"                                  # Canadian number: A2P 10DLC not required
+
+# Which Messaging Service each number type belongs in (matched on the service name)
+EXPECTED_SERVICE = {
+    "Marketing": "marketing",
+    "Cash Bids": "notification",
+    "Sales / CRM": "notification",
+    "System": "notification",
+    # Goose numbers are not checked
+}
+
+# Canadian area codes (NANP). A2P 10DLC applies to US numbers only.
+CANADIAN_AREA_CODES = {
+    "204", "226", "236", "249", "250", "257", "263", "289", "306", "343", "354",
+    "365", "367", "368", "382", "403", "416", "418", "428", "431", "437", "438",
+    "450", "460", "468", "474", "506", "514", "519", "548", "579", "581", "584",
+    "587", "600", "604", "613", "639", "647", "672", "683", "705", "709", "742",
+    "753", "778", "780", "782", "807", "819", "825", "867", "873", "879", "902",
+    "905",
+}
 ON_MAIN_MARK = "on main"
 
 # Status shown when a subaccount/service has nothing to report
@@ -1144,6 +1170,66 @@ def build_rows(header, groups_data, rank, summary, band_prefix="Subaccount",
     return rows, groups
 
 
+def is_canadian(phone):
+    digits = re.sub(r"\D", "", phone or "")
+    return len(digits) == 11 and digits[0] == "1" and digits[1:4] in CANADIAN_AREA_CODES
+
+
+def service_kind(service_name):
+    name = squash(service_name)
+    if "market" in name:
+        return "marketing"
+    if "notification" in name:
+        return "notification"
+    return None
+
+
+def number_checks(phone, types, links, has_webhook):
+    """
+    Problems with how a subaccount number is set up, as short marks for its cell.
+    links: [(service name, campaign status)] the number is in.
+    """
+    canadian = is_canadian(phone)
+    marks = [CA_MARK] if canadian else []
+
+    if not links:
+        if canadian:
+            marks.append("webhook" if has_webhook else NOT_IN_SERVICE_MARK)
+        else:
+            marks.append(WEBHOOK_ONLY_MARK if has_webhook else NOT_IN_SERVICE_MARK)
+        return marks
+
+    # In the right kind of service for its type?
+    expected = {EXPECTED_SERVICE[t] for t in types if t in EXPECTED_SERVICE}
+    actual = {service_kind(name) for name, _ in links} - {None}
+    if expected and actual and not (expected & actual):
+        marks.append(f"{WRONG_SERVICE_MARK}: in {', '.join(n for n, _ in links)}")
+
+    # Campaign of that service approved? (not needed for Canadian numbers)
+    if not canadian:
+        status = worst_status([st for _, st in links])
+        if status == "FAILED":
+            marks.append(CAMPAIGN_FAILED_MARK)
+        elif status in ("IN_PROGRESS", "PENDING"):
+            marks.append(CAMPAIGN_PENDING_MARK)
+        elif status == NO_CAMPAIGN:
+            marks.append(NO_CAMPAIGN_MARK)
+
+    return marks
+
+
+def mark_rule(cols, text, bg, fg, bold=False):
+    """Conditional colour for cells containing a mark (Phone Numbers tab)."""
+    return {
+        "cols": cols,
+        "booleanRule": {
+            "condition": {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": text}]},
+            "format": {"backgroundColor": rgb(bg),
+                       "textFormat": {"foregroundColor": rgb(fg), "bold": bold}},
+        },
+    }
+
+
 def pivot_cell(entries):
     """
     One cell of the Phone Numbers tab. With a single number just the number;
@@ -1229,8 +1315,14 @@ def main():
             campaigns = get_campaigns(sub_sid, sub_token, service_sid)
             service_numbers = get_service_numbers(sub_sid, sub_token, service_sid)
 
+            service_status = worst_status([
+                get_value(c, "campaign_status", "campaignStatus", "status")
+                for c in campaigns
+            ]) if campaigns else NO_CAMPAIGN
+
             for n in service_numbers:
-                number_links.setdefault(n.get("sid"), []).append(service_name)
+                number_links.setdefault(n.get("sid"), []).append(
+                    (service_name, service_status))
 
             count_cell = plural(len(service_numbers), "number") if service_numbers else "—"
 
@@ -1282,15 +1374,15 @@ def main():
         # Phone Numbers tab: put each number into its type column(s)
         for num in inventory:
             friendly = num.get("friendly_name") or ""
-            linked = number_links.get(num.get("sid"), [])
+            links = number_links.get(num.get("sid"), [])
+            linked = [name for name, _ in links]
 
             text = num.get("phone_number", "")
             notes = []
             types = number_types(friendly, linked, num.get("phone_number", ""))
             if "Goose" in types and environment(friendly):
                 notes.append(environment(friendly))
-            if not linked:
-                notes.append(NOT_IN_SERVICE_MARK)
+            notes += number_checks(text, types, links, bool(num.get("sms_url")))
             if notes:
                 text += "  · " + " · ".join(notes)
 
@@ -1484,9 +1576,13 @@ def main():
         header=NUMBERS_HEADER,
         widths=NUMBERS_COLUMN_WIDTHS,
         status_col=N_COL_TOTAL,
-        tab_color=("#D64545" if NO_SUBACCOUNT in pivot_text
-                   else "#E8A33D" if any(ON_MAIN_MARK in c or NOT_IN_SERVICE_MARK in c
-                                         for c in pivot_text)
+        tab_color=("#D64545" if NO_SUBACCOUNT in pivot_text or any(
+                       m in c for c in pivot_text
+                       for m in (WRONG_SERVICE_MARK, CAMPAIGN_FAILED_MARK))
+                   else "#E8A33D" if any(
+                       m in c for c in pivot_text
+                       for m in (ON_MAIN_MARK, NOT_IN_SERVICE_MARK, WEBHOOK_ONLY_MARK,
+                                 NO_CAMPAIGN_MARK, CAMPAIGN_PENDING_MARK))
                    else "#2E9E5B"),
         wrap_cols=list(range(*type_cols)),
         mono_cols=list(range(*type_cols)),
@@ -1496,26 +1592,15 @@ def main():
         zebra=True,
         grid_lines=True,
         first_col_fill="#E6ECF3",
+        # First matching rule wins, so the most serious problem colours the cell
         extra_rules=[
-            {   # still on the main account: needs moving (or a subaccount first)
-                "cols": type_cols,
-                "booleanRule": {
-                    "condition": {"type": "TEXT_CONTAINS",
-                                  "values": [{"userEnteredValue": ON_MAIN_MARK}]},
-                    "format": {"backgroundColor": rgb("#FFF1C2"),
-                               "textFormat": {"foregroundColor": rgb("#8A6100"),
-                                              "bold": True}},
-                },
-            },
-            {   # number not attached to any Messaging Service
-                "cols": type_cols,
-                "booleanRule": {
-                    "condition": {"type": "TEXT_CONTAINS",
-                                  "values": [{"userEnteredValue": NOT_IN_SERVICE_MARK}]},
-                    "format": {"backgroundColor": rgb("#FFE3CC"),
-                               "textFormat": {"foregroundColor": rgb("#9C4A00")}},
-                },
-            },
+            mark_rule(type_cols, WRONG_SERVICE_MARK, "#FBDADA", "#B3261E"),
+            mark_rule(type_cols, CAMPAIGN_FAILED_MARK, "#FBDADA", "#B3261E"),
+            mark_rule(type_cols, WEBHOOK_ONLY_MARK, "#FFE3CC", "#9C4A00"),
+            mark_rule(type_cols, NOT_IN_SERVICE_MARK, "#FFE3CC", "#9C4A00"),
+            mark_rule(type_cols, NO_CAMPAIGN_MARK, "#FFE3CC", "#9C4A00"),
+            mark_rule(type_cols, CAMPAIGN_PENDING_MARK, "#FFF1C2", "#8A6100"),
+            mark_rule(type_cols, ON_MAIN_MARK, "#FFF1C2", "#8A6100", bold=True),
             {   # subaccount without any numbers
                 "cols": (N_COL_TOTAL, N_COL_TOTAL + 1),
                 "booleanRule": {
