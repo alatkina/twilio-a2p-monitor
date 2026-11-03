@@ -91,14 +91,26 @@ CAMPAIGN_PENDING_MARK = "campaign pending"
 NO_CAMPAIGN_MARK = "service has no campaign"
 CA_MARK = "CA"                                  # Canadian number: A2P 10DLC not required
 
-# Which Messaging Service each number type belongs in (matched on the service name)
+# Setup standard per number type (Confluence "Twilio Subaccounts Setup"):
+#   type          -> Messaging Service            webhook ends with
+#   CRM / Sales   -> Account Notification          /receive-sms/account
+#   Marketing     -> Marketing                     /receive-sms/marketing
+#   Cash Bids     -> Marketing                     /receive-sms/no-reply
+#   System        -> Account Notification          /receive-sms/no-reply
+# Goose numbers are not checked.
 EXPECTED_SERVICE = {
     "Marketing": "marketing",
-    "Cash Bids": "notification",
+    "Cash Bids": "marketing",
     "Sales / CRM": "notification",
     "System": "notification",
-    # Goose numbers are not checked
 }
+EXPECTED_WEBHOOK = {
+    "Marketing": "receive-sms/marketing",
+    "Cash Bids": "receive-sms/no-reply",
+    "Sales / CRM": "receive-sms/account",
+    "System": "receive-sms/no-reply",
+}
+WRONG_WEBHOOK_MARK = "wrong webhook"
 
 # Canadian area codes (NANP). A2P 10DLC applies to US numbers only.
 CANADIAN_AREA_CODES = {
@@ -1184,13 +1196,19 @@ def service_kind(service_name):
     return None
 
 
-def number_checks(phone, types, links, has_webhook):
+def number_checks(phone, types, links, has_webhook, sms_url=""):
     """
     Problems with how a subaccount number is set up, as short marks for its cell.
     links: [(service name, campaign status)] the number is in.
     """
     canadian = is_canadian(phone)
     marks = [CA_MARK] if canadian else []
+
+    # Webhook points at the right endpoint for its type? (only AgVend portal webhooks)
+    url = (sms_url or "").lower().rstrip("/")
+    expected_hooks = {EXPECTED_WEBHOOK[t] for t in types if t in EXPECTED_WEBHOOK}
+    if "receive-sms/" in url and expected_hooks and not any(url.endswith(h) for h in expected_hooks):
+        marks.append(f"{WRONG_WEBHOOK_MARK}: …/{url.split('/receive-sms/')[-1]}")
 
     if not links:
         if canadian:
@@ -1382,7 +1400,8 @@ def main():
             types = number_types(friendly, linked, num.get("phone_number", ""))
             if "Goose" in types and environment(friendly):
                 notes.append(environment(friendly))
-            notes += number_checks(text, types, links, bool(num.get("sms_url")))
+            notes += number_checks(text, types, links, bool(num.get("sms_url")),
+                                   num.get("sms_url") or "")
             if notes:
                 text += "  · " + " · ".join(notes)
 
@@ -1582,6 +1601,7 @@ def main():
                    else "#E8A33D" if any(
                        m in c for c in pivot_text
                        for m in (ON_MAIN_MARK, NOT_IN_SERVICE_MARK, WEBHOOK_ONLY_MARK,
+                                 WRONG_WEBHOOK_MARK,
                                  NO_CAMPAIGN_MARK, CAMPAIGN_PENDING_MARK))
                    else "#2E9E5B"),
         wrap_cols=list(range(*type_cols)),
@@ -1596,6 +1616,7 @@ def main():
         extra_rules=[
             mark_rule(type_cols, WRONG_SERVICE_MARK, "#FBDADA", "#B3261E"),
             mark_rule(type_cols, CAMPAIGN_FAILED_MARK, "#FBDADA", "#B3261E"),
+            mark_rule(type_cols, WRONG_WEBHOOK_MARK, "#FFE3CC", "#9C4A00"),
             mark_rule(type_cols, WEBHOOK_ONLY_MARK, "#FFE3CC", "#9C4A00"),
             mark_rule(type_cols, NOT_IN_SERVICE_MARK, "#FFE3CC", "#9C4A00"),
             mark_rule(type_cols, NO_CAMPAIGN_MARK, "#FFE3CC", "#9C4A00"),
