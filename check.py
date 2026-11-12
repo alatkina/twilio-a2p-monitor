@@ -258,7 +258,7 @@ PARTNER_ALIASES = {
     "River Valley": ["river_valley"],
     "Shur Gro": ["shurgro"],
     "Soil Mender": ["Soil Mender", "soil"],  # voice app conversation_agent_soil_prod
-    "Heritage": ["heritage"],                # voice app conversation_agent_heritage_prod
+    "Heritage Cooperative": ["heritage"],    # voice app conversation_agent_heritage_prod
     "South West Terminal Ltd": ["southwestterminal"],
     "Superior Ag": ["superiorag"],
     "SYNENERGY PARTNERS, LLC": ["SynEnergy"],
