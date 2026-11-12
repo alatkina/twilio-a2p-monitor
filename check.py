@@ -777,7 +777,7 @@ def effective_name(num, apps):
     friendly = num.get("friendly_name") or ""
     app = apps.get(num.get("voice_application_sid"))
     if app and not has_letters(friendly) and app_to_name(app):
-        return app_to_name(app), f"{friendly}  · voice app {app}"
+        return app_to_name(app), friendly
     return friendly, friendly
 
 
