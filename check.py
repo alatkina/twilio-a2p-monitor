@@ -238,7 +238,10 @@ PARTNER_ALIASES = {
     "Mercer Landmark": ["mercer_landmark"],
     "Mid Kansas Cooperative": ["mkc"],
     "Midway Coop": ["midwaycoop"],
-    "NEW Cooperative": ["NEW Cooperative"],
+    "NEW Cooperative": ["NEW Cooperative", "new_coop"],
+    "HiLine Cooperative": ["hilinecooperative", "HiLine"],
+    "All In Agro": ["allinagro", "All In Agro"],
+    "Ag View FS": ["agviewfs", "Ag View FS"],
     "Agtegra": ["Agtegra"],
     "Enerbase Cooperative Resources": ["Enerbase"],  # numbers are named "Enerbase Coop ..."
     "Farmers Cooperative Dorchester": ["FCD", "Farmers Cooperative Dorchester"],
@@ -254,7 +257,8 @@ PARTNER_ALIASES = {
     "Reichmansales": ["reichmansales"],
     "River Valley": ["river_valley"],
     "Shur Gro": ["shurgro"],
-    "Soil Mender": ["Soil Mender"],
+    "Soil Mender": ["Soil Mender", "soil"],  # voice app conversation_agent_soil_prod
+    "Heritage": ["heritage"],                # voice app conversation_agent_heritage_prod
     "South West Terminal Ltd": ["southwestterminal"],
     "Superior Ag": ["superiorag"],
     "SYNENERGY PARTNERS, LLC": ["SynEnergy"],
@@ -622,7 +626,9 @@ def classify_main_number(friendly, service_names, subaccounts):
             sub_name = find_subaccount(partner, subaccounts)
             return (GOOSE, sub_name or f"{partner} (no subaccount)", "",
                     [sub_name] if sub_name else [])
-        return GOOSE, GOOSE, "", []
+        key = re.split(r"\s+-\s+", friendly or "")[0].strip()
+        label = f"{key} (partner unknown)" if key and has_letters(key) else GOOSE
+        return GOOSE, label, "Add this partner to PARTNER_ALIASES", []
 
     # AgVend's own numbers (TCP, test, QA...) before partner matching
     if any(has_word(blob, k) for k in INTERNAL_KEYWORDS):
@@ -737,6 +743,42 @@ def get_campaigns(sub_sid, sub_token, service_sid):
         return []
 
     return data.get("compliance", [])
+
+
+def get_voice_apps(sub_sid, sub_token):
+    """TwiML apps of an account: SID -> friendly name (e.g. goose_assistant_five_star_prod)."""
+    apps = t_get_all(
+        f"{TWILIO_BASE}/Accounts/{sub_sid}/Applications.json?PageSize=1000",
+        sub_sid,
+        sub_token,
+        "applications",
+    )
+    return {a.get("sid"): a.get("friendly_name") or "" for a in apps}
+
+
+def app_to_name(app):
+    """
+    goose_assistant_five_star_prod   -> "five_star - Goose Assistant (prod)"
+    conversation_agent_heritage_prod -> "heritage - Conversation Agent (prod)"
+    Gives numbers named only "(641) 225-6689" a readable name, so the usual
+    partner / Goose / environment rules work on them.
+    """
+    m = re.match(r"(goose_assistant|conversation_agent)_(.+?)(?:_(prod|staging|stg|dev))?$",
+                 (app or "").strip().lower())
+    if not m:
+        return None
+    kind = "Goose Assistant" if m.group(1) == "goose_assistant" else "Conversation Agent"
+    env = f" ({m.group(3)})" if m.group(3) else ""
+    return f"{m.group(2)} - {kind}{env}"
+
+
+def effective_name(num, apps):
+    """(name used for matching, name shown in the sheet)"""
+    friendly = num.get("friendly_name") or ""
+    app = apps.get(num.get("voice_application_sid"))
+    if app and not has_letters(friendly) and app_to_name(app):
+        return app_to_name(app), f"{friendly}  · voice app {app}"
+    return friendly, friendly
 
 
 def get_incoming_numbers(sub_sid, sub_token):
@@ -1316,6 +1358,7 @@ def main():
 
         # Phone Numbers > Inventory
         inventory = get_incoming_numbers(sub_sid, sub_token)
+        sub_apps = get_voice_apps(sub_sid, sub_token) if inventory else {}
 
         # number SID -> [service names]
         number_links = {}
@@ -1391,7 +1434,7 @@ def main():
 
         # Phone Numbers tab: put each number into its type column(s)
         for num in inventory:
-            friendly = num.get("friendly_name") or ""
+            friendly, _ = effective_name(num, sub_apps)
             links = number_links.get(num.get("sid"), [])
             linked = [name for name, _ in links]
 
@@ -1436,8 +1479,10 @@ def main():
 
     main_category = {}  # number SID -> category, for sorting
 
+    main_apps = get_voice_apps(MASTER_SID, MASTER_TOKEN)
+
     for num in get_incoming_numbers(MASTER_SID, MASTER_TOKEN):
-        friendly = num.get("friendly_name") or ""
+        friendly, shown_name = effective_name(num, main_apps)
         services = main_links.get(num.get("sid"), [])
         status, matched, next_step, subs = classify_main_number(
             friendly, services, all_subaccounts)
@@ -1482,7 +1527,7 @@ def main():
 
         main_buckets[status].append([
             as_text(num.get("phone_number", "")),
-            friendly or "—",
+            shown_name or "—",
             type_cell,
             ", ".join(services) or "—",
             matched,
